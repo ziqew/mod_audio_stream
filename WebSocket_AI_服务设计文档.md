@@ -6,11 +6,12 @@
 
 ### 版本信息
 
-- **文档版本**: 1.2.0
+- **文档版本**: 1.3.0
 - **创建日期**: 2026-02-06
 - **最后更新**: 2026-02-06
 - **作者**: AI Service Team
 - **更新内容**:
+  - v1.3.0: 添加 HTTPS 和 WebSocket 两种 TTS 实现的完整代码和对比
   - v1.2.0: 添加阿里云 TTS API 选择说明（HTTP POST vs WebSocket）
   - v1.1.0: 添加附录A - TTS音频流传输详解
 
@@ -563,6 +564,752 @@ async with websockets.connect(
 | **推荐使用** | 通用场景 | 低延迟要求场景 |
 
 **结论**: 对于大多数语音对话场景，HTTP POST 接口已经足够。只有在对延迟有极致要求时，才需要考虑切换到 WebSocket 流式接口。
+
+#### 阿里云 TTS 两种实现方式完整代码
+
+本节提供两种 TTS 实现的完整代码，展示如何将音频流写入并返回给 mod_audio_stream。
+
+##### 实现一：基于 HTTPS 的 TTS 适配器
+
+这是当前推荐的实现方式，使用 HTTP POST 一次性获取完整音频。
+
+```python
+"""
+HTTPS TTS 适配器实现
+文件: src/adapters/tts/qwen_https.py
+"""
+import aiohttp
+import base64
+import json
+import logging
+from typing import AsyncGenerator, Optional
+
+logger = logging.getLogger(__name__)
+
+
+class QwenHTTPSTTSAdapter:
+    """基于 HTTPS 的通义千问 TTS 适配器"""
+
+    def __init__(self, api_key: str, model: str = "cosyvoice-v1", voice: str = "longxiaochun"):
+        """
+        初始化 HTTPS TTS 适配器
+
+        参数:
+            api_key: 阿里云 API Key
+            model: TTS 模型名称
+            voice: 默认语音名称
+        """
+        self.api_key = api_key
+        self.model = model
+        self.voice = voice
+        self.endpoint = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/synthesis"
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def _ensure_session(self):
+        """确保 HTTP 会话存在"""
+        if self.session is None:
+            self.session = aiohttp.ClientSession()
+
+    async def synthesize(self, text: str, voice: str = None, sample_rate: int = 8000) -> bytes:
+        """
+        文本转语音 - 一次性返回完整音频
+
+        参数:
+            text: 要合成的文本
+            voice: 语音名称（可选，使用默认值）
+            sample_rate: 采样率（8000 或 16000）
+
+        返回:
+            bytes: PCM 格式的音频数据
+        """
+        await self._ensure_session()
+
+        try:
+            # 使用指定的 voice 或默认 voice
+            voice_name = voice if voice else self.voice
+
+            # 构建请求
+            payload = {
+                "model": self.model,
+                "input": {
+                    "text": text
+                },
+                "parameters": {
+                    "voice": voice_name,
+                    "format": "pcm",
+                    "sample_rate": sample_rate
+                }
+            }
+
+            headers = {
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json'
+            }
+
+            logger.info(f"TTS 请求: {len(text)} 字符, voice={voice_name}, rate={sample_rate}")
+
+            # 发送 POST 请求
+            async with self.session.post(self.endpoint, json=payload, headers=headers) as resp:
+                if resp.status == 200:
+                    # 一次性读取完整音频数据
+                    audio_data = await resp.read()
+                    logger.info(f"TTS 成功: 收到 {len(audio_data)} bytes 音频")
+                    return audio_data
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"TTS 请求失败: {resp.status}, {error_text}")
+                    return b""
+
+        except Exception as e:
+            logger.error(f"TTS 错误: {e}", exc_info=True)
+            return b""
+
+    async def send_to_mod_audio_stream(self, websocket, text: str,
+                                       voice: str = None,
+                                       sample_rate: int = 8000) -> bool:
+        """
+        合成音频并直接发送到 mod_audio_stream
+
+        参数:
+            websocket: WebSocket 连接对象
+            text: 要合成的文本
+            voice: 语音名称
+            sample_rate: 采样率
+
+        返回:
+            bool: 是否成功发送
+        """
+        try:
+            # 1. 调用 TTS API 获取音频
+            audio_data = await self.synthesize(text, voice, sample_rate)
+
+            if not audio_data:
+                logger.warning("TTS 返回空音频")
+                return False
+
+            # 2. Base64 编码音频数据
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+
+            # 3. 构建 streamAudio 消息
+            message = {
+                "type": "streamAudio",
+                "data": {
+                    "audioDataType": "raw",
+                    "sampleRate": sample_rate,
+                    "audioData": audio_base64
+                }
+            }
+
+            # 4. 发送到 mod_audio_stream
+            await websocket.send(json.dumps(message))
+
+            logger.info(f"音频已发送到 mod_audio_stream: {len(audio_data)} bytes, "
+                       f"sample_rate={sample_rate} Hz")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"发送音频到 mod_audio_stream 失败: {e}", exc_info=True)
+            return False
+
+    async def close(self):
+        """关闭会话"""
+        if self.session:
+            await self.session.close()
+            self.session = None
+```
+
+**HTTPS 实现的音频流写入流程**:
+
+```
+┌─────────────────────────────────────────────────┐
+│  步骤 1: 调用 TTS API (HTTP POST)               │
+│  audio_data = await synthesize(text)            │
+│  ↓ 等待完整音频生成 (200-800ms)                 │
+│  ↓ 返回: bytes (完整 PCM 音频)                  │
+└─────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────┐
+│  步骤 2: Base64 编码                            │
+│  audio_base64 = base64.b64encode(audio_data)    │
+└─────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────┐
+│  步骤 3: 构建 streamAudio 消息                  │
+│  message = {                                    │
+│    "type": "streamAudio",                       │
+│    "data": {                                    │
+│      "audioDataType": "raw",                    │
+│      "sampleRate": 8000,                        │
+│      "audioData": "<base64 string>"             │
+│    }                                            │
+│  }                                              │
+└─────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────┐
+│  步骤 4: 通过 WebSocket 发送                    │
+│  await websocket.send(json.dumps(message))      │
+│  ↓                                              │
+│  ↓ 发送到 mod_audio_stream                     │
+└─────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────┐
+│  mod_audio_stream 接收并播放                    │
+│  1. 接收 JSON 消息                              │
+│  2. Base64 解码音频                             │
+│  3. 写入临时文件 /tmp/freeswitch/audio_xxx.r8  │
+│  4. 触发 play 事件                              │
+│  5. 使用 uuid_broadcast 播放到通道             │
+└─────────────────────────────────────────────────┘
+```
+
+##### 实现二：基于 WebSocket 流式的 TTS 适配器
+
+这是低延迟实现，支持流式传输音频。
+
+```python
+"""
+WebSocket 流式 TTS 适配器实现
+文件: src/adapters/tts/qwen_websocket.py
+"""
+import asyncio
+import base64
+import json
+import logging
+import websockets
+from typing import AsyncGenerator, Optional
+
+logger = logging.getLogger(__name__)
+
+
+class QwenWebSocketTTSAdapter:
+    """基于 WebSocket 流式的通义千问 TTS 适配器"""
+
+    def __init__(self, api_key: str, model: str = "cosyvoice-v1", voice: str = "longxiaochun"):
+        """
+        初始化 WebSocket TTS 适配器
+
+        参数:
+            api_key: 阿里云 API Key
+            model: TTS 模型名称
+            voice: 默认语音名称
+        """
+        self.api_key = api_key
+        self.model = model
+        self.voice = voice
+        self.endpoint = "wss://dashscope.aliyuncs.com/api-ws/v1/services/audio/tts/synthesis"
+        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+
+    async def synthesize_stream(self, text: str, voice: str = None,
+                               sample_rate: int = 8000) -> AsyncGenerator[bytes, None]:
+        """
+        文本转语音 - 流式返回音频块
+
+        参数:
+            text: 要合成的文本
+            voice: 语音名称
+            sample_rate: 采样率
+
+        返回:
+            AsyncGenerator[bytes]: 音频数据流（PCM 格式）
+        """
+        voice_name = voice if voice else self.voice
+
+        try:
+            # 连接 WebSocket
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+
+            async with websockets.connect(self.endpoint, extra_headers=headers) as ws:
+                logger.info(f"WebSocket TTS 已连接: {len(text)} 字符")
+
+                # 发送 TTS 请求
+                request = {
+                    "header": {
+                        "streaming": "duplex"  # 双工流式
+                    },
+                    "payload": {
+                        "model": self.model,
+                        "text": text,
+                        "voice": voice_name,
+                        "format": "pcm",
+                        "sample_rate": sample_rate
+                    }
+                }
+
+                await ws.send(json.dumps(request))
+                logger.info(f"TTS 请求已发送: voice={voice_name}, rate={sample_rate}")
+
+                # 流式接收音频块
+                chunk_count = 0
+                total_bytes = 0
+
+                async for message in ws:
+                    try:
+                        data = json.loads(message)
+
+                        # 检查消息类型
+                        event = data.get("header", {}).get("event")
+
+                        if event == "audio-frame":
+                            # 音频帧数据
+                            audio_base64 = data.get("payload", {}).get("audio")
+                            if audio_base64:
+                                # Base64 解码
+                                audio_chunk = base64.b64decode(audio_base64)
+                                chunk_count += 1
+                                total_bytes += len(audio_chunk)
+
+                                logger.debug(f"收到音频块 #{chunk_count}: {len(audio_chunk)} bytes")
+
+                                # 流式返回音频块
+                                yield audio_chunk
+
+                        elif event == "synthesis-complete":
+                            # 合成完成
+                            logger.info(f"TTS 流式合成完成: {chunk_count} 块, 共 {total_bytes} bytes")
+                            break
+
+                        elif event == "error":
+                            # 错误处理
+                            error_msg = data.get("payload", {}).get("message", "未知错误")
+                            logger.error(f"TTS 错误: {error_msg}")
+                            break
+
+                    except json.JSONDecodeError as e:
+                        logger.error(f"解析 WebSocket 消息失败: {e}")
+                        continue
+
+        except Exception as e:
+            logger.error(f"WebSocket TTS 错误: {e}", exc_info=True)
+
+    async def synthesize(self, text: str, voice: str = None, sample_rate: int = 8000) -> bytes:
+        """
+        文本转语音 - 收集所有流式数据后一次性返回
+
+        参数:
+            text: 要合成的文本
+            voice: 语音名称
+            sample_rate: 采样率
+
+        返回:
+            bytes: 完整的 PCM 音频数据
+        """
+        audio_buffer = bytearray()
+
+        async for chunk in self.synthesize_stream(text, voice, sample_rate):
+            audio_buffer.extend(chunk)
+
+        return bytes(audio_buffer)
+
+    async def send_to_mod_audio_stream_streaming(self, websocket, text: str,
+                                                 voice: str = None,
+                                                 sample_rate: int = 8000,
+                                                 chunk_size: int = 16000) -> bool:
+        """
+        流式合成音频并实时发送到 mod_audio_stream
+
+        这是流式实现的核心：边接收 TTS 音频块，边发送到 mod_audio_stream
+
+        参数:
+            websocket: 到 mod_audio_stream 的 WebSocket 连接
+            text: 要合成的文本
+            voice: 语音名称
+            sample_rate: 采样率
+            chunk_size: 每次发送的音频块大小（字节）
+
+        返回:
+            bool: 是否成功发送
+        """
+        try:
+            audio_buffer = bytearray()
+            chunk_count = 0
+
+            # 流式接收 TTS 音频
+            async for audio_chunk in self.synthesize_stream(text, voice, sample_rate):
+                # 累积到缓冲区
+                audio_buffer.extend(audio_chunk)
+
+                # 当缓冲区达到指定大小时，发送一次
+                while len(audio_buffer) >= chunk_size:
+                    # 取出一块数据
+                    send_chunk = bytes(audio_buffer[:chunk_size])
+                    audio_buffer = audio_buffer[chunk_size:]
+
+                    # 编码并发送
+                    audio_base64 = base64.b64encode(send_chunk).decode('utf-8')
+
+                    message = {
+                        "type": "streamAudio",
+                        "data": {
+                            "audioDataType": "raw",
+                            "sampleRate": sample_rate,
+                            "audioData": audio_base64
+                        }
+                    }
+
+                    await websocket.send(json.dumps(message))
+                    chunk_count += 1
+
+                    logger.debug(f"发送音频块 #{chunk_count} 到 mod_audio_stream: "
+                               f"{len(send_chunk)} bytes")
+
+            # 发送剩余数据
+            if len(audio_buffer) > 0:
+                send_chunk = bytes(audio_buffer)
+                audio_base64 = base64.b64encode(send_chunk).decode('utf-8')
+
+                message = {
+                    "type": "streamAudio",
+                    "data": {
+                        "audioDataType": "raw",
+                        "sampleRate": sample_rate,
+                        "audioData": audio_base64
+                    }
+                }
+
+                await websocket.send(json.dumps(message))
+                chunk_count += 1
+
+                logger.debug(f"发送最后音频块 #{chunk_count}: {len(send_chunk)} bytes")
+
+            logger.info(f"流式音频发送完成: 共 {chunk_count} 块发送到 mod_audio_stream")
+            return True
+
+        except Exception as e:
+            logger.error(f"流式发送音频失败: {e}", exc_info=True)
+            return False
+
+    async def send_to_mod_audio_stream(self, websocket, text: str,
+                                       voice: str = None,
+                                       sample_rate: int = 8000) -> bool:
+        """
+        合成音频并发送到 mod_audio_stream（非流式，兼容接口）
+
+        参数:
+            websocket: WebSocket 连接
+            text: 要合成的文本
+            voice: 语音名称
+            sample_rate: 采样率
+
+        返回:
+            bool: 是否成功
+        """
+        try:
+            # 收集完整音频
+            audio_data = await self.synthesize(text, voice, sample_rate)
+
+            if not audio_data:
+                return False
+
+            # 编码并发送
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+
+            message = {
+                "type": "streamAudio",
+                "data": {
+                    "audioDataType": "raw",
+                    "sampleRate": sample_rate,
+                    "audioData": audio_base64
+                }
+            }
+
+            await websocket.send(json.dumps(message))
+
+            logger.info(f"音频已发送到 mod_audio_stream: {len(audio_data)} bytes")
+            return True
+
+        except Exception as e:
+            logger.error(f"发送音频失败: {e}", exc_info=True)
+            return False
+
+    async def close(self):
+        """关闭连接"""
+        if self.ws and not self.ws.closed:
+            await self.ws.close()
+            self.ws = None
+```
+
+**WebSocket 实现的音频流写入流程**:
+
+```
+┌─────────────────────────────────────────────────┐
+│  步骤 1: 建立 WebSocket 连接到 TTS API          │
+│  ws = await websockets.connect(endpoint)        │
+└─────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────┐
+│  步骤 2: 发送 TTS 请求                          │
+│  await ws.send(json.dumps(request))             │
+└─────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────┐
+│  步骤 3: 流式接收音频块（循环）                 │
+│  async for message in ws:                       │
+│    ↓ 收到 audio-frame 事件                      │
+│    ↓ audio_chunk = base64.decode(...)           │
+│    ↓ (首块延迟 < 100ms)                         │
+└─────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────┐
+│  步骤 4: 实时发送到 mod_audio_stream            │
+│  每收到一个音频块:                              │
+│    1. 累积到缓冲区                              │
+│    2. 缓冲区达到阈值时:                         │
+│       - Base64 编码                             │
+│       - 构建 streamAudio 消息                   │
+│       - await websocket.send(...)               │
+│    3. 继续接收下一块                            │
+└─────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────┐
+│  步骤 5: 完成信号                               │
+│  收到 synthesis-complete 事件                   │
+│  发送剩余缓冲区数据                             │
+└─────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────┐
+│  mod_audio_stream 接收并播放                    │
+│  多次接收 streamAudio 消息，边接收边播放        │
+└─────────────────────────────────────────────────┘
+```
+
+##### 两种实现在 SessionHandler 中的使用示例
+
+```python
+"""
+在 SessionHandler 中使用两种 TTS 实现
+文件: src/session/handler.py
+"""
+from src.adapters.tts.qwen_https import QwenHTTPSTTSAdapter
+from src.adapters.tts.qwen_websocket import QwenWebSocketTTSAdapter
+
+
+class SessionHandler:
+    """会话处理器"""
+
+    def __init__(self, websocket, session_id: str, config: dict, use_streaming_tts: bool = False):
+        """
+        初始化会话处理器
+
+        参数:
+            websocket: 到 mod_audio_stream 的 WebSocket 连接
+            session_id: 会话 ID
+            config: 配置对象
+            use_streaming_tts: 是否使用流式 TTS（True=WebSocket, False=HTTPS）
+        """
+        self.websocket = websocket
+        self.session_id = session_id
+        self.config = config
+
+        # 根据配置选择 TTS 适配器
+        if use_streaming_tts:
+            # 使用 WebSocket 流式 TTS
+            self.tts_adapter = QwenWebSocketTTSAdapter(
+                api_key=config.tts_api_key,
+                model=config.tts_model,
+                voice=config.tts_voice
+            )
+            logger.info(f"[{session_id}] 使用 WebSocket 流式 TTS")
+        else:
+            # 使用 HTTPS TTS
+            self.tts_adapter = QwenHTTPSTTSAdapter(
+                api_key=config.tts_api_key,
+                model=config.tts_model,
+                voice=config.tts_voice
+            )
+            logger.info(f"[{session_id}] 使用 HTTPS TTS")
+
+        self.use_streaming = use_streaming_tts
+
+    async def _process_speech_https(self, text: str):
+        """使用 HTTPS TTS 处理（方式一）"""
+
+        # 方式 1a: 使用便捷方法
+        success = await self.tts_adapter.send_to_mod_audio_stream(
+            websocket=self.websocket,
+            text=text,
+            voice=self.config.tts_voice,
+            sample_rate=self.config.tts_sample_rate
+        )
+
+        if success:
+            logger.info(f"[{self.session_id}] HTTPS TTS 音频已发送")
+
+        # 方式 1b: 手动控制流程
+        # audio_data = await self.tts_adapter.synthesize(
+        #     text=text,
+        #     voice=self.config.tts_voice,
+        #     sample_rate=self.config.tts_sample_rate
+        # )
+        # await self.send_audio(audio_data)
+
+    async def _process_speech_websocket_streaming(self, text: str):
+        """使用 WebSocket 流式 TTS 处理（方式二）"""
+
+        # 使用流式发送（边接收边发送）
+        success = await self.tts_adapter.send_to_mod_audio_stream_streaming(
+            websocket=self.websocket,
+            text=text,
+            voice=self.config.tts_voice,
+            sample_rate=self.config.tts_sample_rate,
+            chunk_size=16000  # 每 16KB 发送一次
+        )
+
+        if success:
+            logger.info(f"[{self.session_id}] WebSocket 流式 TTS 音频已发送")
+
+    async def process_and_respond(self, user_text: str):
+        """处理用户输入并响应"""
+
+        # 1. LLM 生成回复
+        response = await self.llm_adapter.chat([
+            {"role": "user", "content": user_text}
+        ])
+
+        logger.info(f"[{self.session_id}] LLM 回复: {response}")
+
+        # 2. TTS 合成并发送（根据配置选择方式）
+        if self.use_streaming:
+            # WebSocket 流式 TTS
+            await self._process_speech_websocket_streaming(response)
+        else:
+            # HTTPS TTS
+            await self._process_speech_https(response)
+
+    async def send_audio(self, audio_data: bytes):
+        """发送音频到 mod_audio_stream（通用方法）"""
+
+        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+
+        message = {
+            "type": "streamAudio",
+            "data": {
+                "audioDataType": "raw",
+                "sampleRate": self.config.tts_sample_rate,
+                "audioData": audio_base64
+            }
+        }
+
+        await self.websocket.send(json.dumps(message))
+        logger.info(f"[{self.session_id}] 音频已发送: {len(audio_data)} bytes")
+```
+
+##### 配置选择使用哪种实现
+
+在配置文件中添加选项来选择 TTS 实现方式：
+
+```python
+# config.py
+from dataclasses import dataclass
+import os
+
+@dataclass
+class ServiceConfig:
+    # TTS 配置
+    tts_provider: str = "qwen"
+    tts_mode: str = "https"  # "https" 或 "websocket"
+    tts_api_key: str = ""
+    tts_model: str = "cosyvoice-v1"
+    tts_voice: str = "longxiaochun"
+    tts_sample_rate: int = 8000
+
+    @classmethod
+    def from_env(cls):
+        """从环境变量加载配置"""
+        return cls(
+            tts_mode=os.getenv("TTS_MODE", "https"),  # 默认 HTTPS
+            tts_api_key=os.getenv("QWEN_API_KEY", ""),
+            # ... 其他配置
+        )
+```
+
+环境变量配置（.env）：
+
+```bash
+# TTS 模式选择
+TTS_MODE=https          # 使用 HTTPS (推荐，简单稳定)
+# TTS_MODE=websocket    # 使用 WebSocket (低延迟，实时流式)
+
+# TTS API 配置
+QWEN_API_KEY=sk-xxxxx
+TTS_MODEL=cosyvoice-v1
+TTS_VOICE=longxiaochun
+TTS_SAMPLE_RATE=8000
+```
+
+##### 两种实现的完整对比
+
+| 对比项 | HTTPS 实现 | WebSocket 流式实现 |
+|-------|-----------|------------------|
+| **音频获取** | `audio = await synthesize()` | `async for chunk in synthesize_stream()` |
+| **数据流向** | TTS API → 完整音频 → mod_audio_stream | TTS API → 音频块流 → 缓冲 → mod_audio_stream |
+| **发送次数** | 1 次（完整音频） | 多次（音频块流） |
+| **首字延迟** | 200-800ms（等待完整合成） | < 100ms（首块即发） |
+| **内存占用** | 需要缓存完整音频 | 流式处理，内存占用低 |
+| **实现复杂度** | 简单（约 80 行） | 较复杂（约 150 行） |
+| **错误处理** | HTTP 状态码 | WebSocket 事件 + 异常 |
+| **适用场景** | 通用对话场景 | 低延迟要求场景 |
+| **推荐度** | ⭐⭐⭐⭐⭐ 推荐 | ⭐⭐⭐⭐ 特定场景 |
+
+##### 性能对比示例
+
+假设合成 "你好，欢迎使用语音助手" (12个字)：
+
+**HTTPS 实现时序**:
+```
+T=0ms    发送 HTTP POST 请求
+         ↓
+T=500ms  收到完整音频 (假设 24KB)
+         ↓
+T=510ms  Base64 编码
+         ↓
+T=520ms  发送到 mod_audio_stream
+         ↓
+T=530ms  开始播放
+
+总延迟: 530ms
+```
+
+**WebSocket 流式实现时序**:
+```
+T=0ms    建立 WebSocket 连接
+         ↓
+T=10ms   发送 TTS 请求
+         ↓
+T=80ms   收到第一块音频 (3KB)
+         ↓
+T=85ms   发送第一块到 mod_audio_stream
+         ↓
+T=90ms   开始播放（！）
+         ↓
+T=150ms  收到第二块 (3KB) 并发送
+T=220ms  收到第三块 (3KB) 并发送
+T=290ms  收到第四块 (3KB) 并发送
+...
+T=500ms  合成完成
+
+首字延迟: 90ms
+总延迟: 500ms
+```
+
+##### 总结
+
+1. **HTTPS 实现**：
+   - ✅ 简单可靠，适合 90% 的场景
+   - ✅ 一次性获取完整音频，便于处理
+   - ✅ 代码简洁，易于维护
+   - ⚠️ 总延迟稍高（但不是瓶颈）
+
+2. **WebSocket 流式实现**：
+   - ✅ 首字延迟极低（< 100ms）
+   - ✅ 边合成边播放，用户体验更好
+   - ✅ 适合长文本合成
+   - ⚠️ 实现复杂，需要处理流式数据
+   - ⚠️ 需要更多的错误处理和状态管理
+
+**推荐选择**：
+- 默认使用 **HTTPS 实现**
+- 只在对延迟有极致要求时切换到 **WebSocket 流式实现**
 
 ### 3.6 音频处理模块
 
@@ -2949,4 +3696,4 @@ TTS 音频流传输到 mod_audio_stream 的关键点：
 
 **版权声明**: 本文档遵循 MIT 许可证
 
-**最后更新**: 2026-02-06 (v1.2.0 - 添加阿里云 TTS API 选择说明)
+**最后更新**: 2026-02-06 (v1.3.0 - 添加 HTTPS 和 WebSocket 两种 TTS 实现完整代码)
