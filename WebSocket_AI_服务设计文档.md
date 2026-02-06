@@ -6,11 +6,13 @@
 
 ### 版本信息
 
-- **文档版本**: 1.1.0
+- **文档版本**: 1.2.0
 - **创建日期**: 2026-02-06
 - **最后更新**: 2026-02-06
 - **作者**: AI Service Team
-- **更新内容**: 添加附录A - TTS音频流传输详解
+- **更新内容**:
+  - v1.2.0: 添加阿里云 TTS API 选择说明（HTTP POST vs WebSocket）
+  - v1.1.0: 添加附录A - TTS音频流传输详解
 
 ---
 
@@ -442,6 +444,125 @@ class QwenTTSAdapter(TTSAdapter):
             audio_data = await resp.read()
             return audio_data
 ```
+
+#### 阿里云 TTS API 选择说明：HTTP POST vs WebSocket
+
+阿里云 DashScope 提供两种 TTS 调用方式，适用于不同的场景：
+
+##### 1. HTTP POST 接口（当前实现）
+
+**端点**: `https://dashscope.aliyuncs.com/api/v1/services/audio/tts/synthesis`
+
+**特点**:
+- ✅ **简单易用**: 标准的 HTTP REST API，一次请求获取完整音频
+- ✅ **无状态**: 每次请求独立，不需要维护连接和会话状态
+- ✅ **稳定可靠**: 适合批量处理和非实时场景
+- ⚠️ **延迟较高**: 需要等待完整音频合成后才能返回
+- ⚠️ **不支持流式**: 无法边合成边播放
+
+**适用场景**:
+- 离线音频生成（如有声书、播客）
+- 批量内容处理
+- 对实时性要求不高的场景
+- 简单的文本转语音需求
+
+**示例代码**:
+```python
+async with self.session.post(self.endpoint, json=payload, headers=headers) as resp:
+    audio_data = await resp.read()  # 一次性获取完整音频
+    return audio_data
+```
+
+##### 2. WebSocket 实时流式接口
+
+**端点**: `wss://dashscope.aliyuncs.com/api-ws/v1/services/audio/tts/synthesis`
+
+**特点**:
+- ✅ **超低延迟**: 边合成边返回音频流，首字延迟极低
+- ✅ **流式传输**: 支持增量文本输入和音频流输出
+- ✅ **实时交互**: 适合对话式 AI、实时助手等场景
+- ✅ **会话控制**: 可以中途修改语音参数、暂停或继续
+- ⚠️ **实现复杂**: 需要维护 WebSocket 连接和会话状态
+- ⚠️ **资源消耗**: 需要连接池管理，并发场景下资源开销较大
+
+**适用场景**:
+- 实时对话系统
+- 语音助手、虚拟主播
+- 需要极低延迟的交互场景
+- 长文本流式合成
+
+**示例代码**:
+```python
+# WebSocket 实时流式 TTS（参考实现）
+async with websockets.connect(
+    "wss://dashscope.aliyuncs.com/api-ws/v1/services/audio/tts/synthesis",
+    extra_headers={"Authorization": f"Bearer {api_key}"}
+) as ws:
+    # 发送文本
+    await ws.send(json.dumps({
+        "model": "cosyvoice-v1",
+        "input": {"text": text},
+        "parameters": {"voice": voice, "format": "pcm", "sample_rate": 8000}
+    }))
+
+    # 流式接收音频
+    async for message in ws:
+        data = json.loads(message)
+        if data.get("event") == "audio-frame":
+            audio_chunk = base64.b64decode(data["data"])
+            yield audio_chunk  # 边接收边播放
+```
+
+##### 3. 当前实现选择 HTTP POST 的原因
+
+本项目当前使用 **HTTP POST 接口**，主要考虑：
+
+1. **架构简化**:
+   - 服务本身已经是 WebSocket 架构（与 mod_audio_stream 通信）
+   - 避免"双层 WebSocket"（服务 ↔ mod_audio_stream + 服务 ↔ TTS API）增加复杂度
+
+2. **延迟可接受**:
+   - LLM 生成文本本身需要时间（通常 1-3 秒）
+   - TTS 合成时间相对较短（通常 200-800ms）
+   - 总体延迟主要由 LLM 决定，TTS 不是瓶颈
+
+3. **稳定性优先**:
+   - HTTP 请求更稳定，重试机制简单
+   - WebSocket 需要处理连接断开、重连、会话恢复等问题
+
+4. **资源效率**:
+   - 按需请求，无需维护持久连接
+   - 高并发场景下资源消耗更低
+
+##### 4. 何时应该切换到 WebSocket 流式接口
+
+如果您的应用场景符合以下条件，建议切换到 WebSocket 流式接口：
+
+- ✅ **极致延迟要求**: 需要 TTS 首字延迟小于 100ms
+- ✅ **长文本合成**: 需要合成非常长的文本（如朗读文章）
+- ✅ **边合成边播放**: 希望音频生成和播放同时进行
+- ✅ **实时流式 LLM**: 使用流式 LLM 输出，希望 TTS 也流式处理
+
+切换到 WebSocket 实现需要：
+1. 修改 `QwenTTSAdapter` 使用 `websockets` 库
+2. 实现流式音频接收和缓冲
+3. 调整 `SessionHandler` 的音频发送逻辑为流式
+4. 增加连接池和会话管理
+
+##### 5. API 对比总结
+
+| 特性 | HTTP POST（当前） | WebSocket 流式 |
+|------|------------------|---------------|
+| **协议** | HTTP REST | WebSocket |
+| **延迟** | 中等（200-800ms） | 极低（<100ms 首字） |
+| **实现复杂度** | 简单 | 复杂 |
+| **适用场景** | 批量/非实时 | 实时/交互 |
+| **资源消耗** | 低 | 中等 |
+| **状态管理** | 无状态 | 需要会话管理 |
+| **流式输出** | ❌ | ✅ |
+| **推荐使用** | 通用场景 | 低延迟要求场景 |
+
+**结论**: 对于大多数语音对话场景，HTTP POST 接口已经足够。只有在对延迟有极致要求时，才需要考虑切换到 WebSocket 流式接口。
 
 ### 3.6 音频处理模块
 
@@ -2828,4 +2949,4 @@ TTS 音频流传输到 mod_audio_stream 的关键点：
 
 **版权声明**: 本文档遵循 MIT 许可证
 
-**最后更新**: 2026-02-06 (v1.1.0 - 添加TTS音频流传输详解)
+**最后更新**: 2026-02-06 (v1.2.0 - 添加阿里云 TTS API 选择说明)
