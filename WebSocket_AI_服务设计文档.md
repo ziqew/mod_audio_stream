@@ -6,9 +6,11 @@
 
 ### 版本信息
 
-- **文档版本**: 1.0.0
+- **文档版本**: 1.1.0
 - **创建日期**: 2026-02-06
+- **最后更新**: 2026-02-06
 - **作者**: AI Service Team
+- **更新内容**: 添加附录A - TTS音频流传输详解
 
 ---
 
@@ -2204,6 +2206,595 @@ if len(audio_data) > MAX_AUDIO_SIZE:
 
 ---
 
+---
+
+## 附录A: TTS 音频流传输详解
+
+本节专门说明 TTS 语音流如何传输到 mod_audio_stream 的完整流程。
+
+### A.1 传输流程概述
+
+```
+TTS 服务生成音频
+        ↓
+返回 PCM 音频数据 (bytes)
+        ↓
+Base64 编码
+        ↓
+封装为 streamAudio JSON
+        ↓
+通过 WebSocket 发送
+        ↓
+mod_audio_stream 接收
+        ↓
+Base64 解码
+        ↓
+保存为临时文件
+        ↓
+触发 mod_audio_stream::play 事件
+        ↓
+FreeSWITCH 播放给呼叫者
+```
+
+### A.2 详细实现步骤
+
+#### 步骤 1: TTS 生成音频
+
+```python
+# 调用 TTS 适配器
+audio_response = await self.tts_adapter.synthesize(
+    text=response,              # AI 回复文本
+    voice=self.config.tts_voice,    # 语音类型
+    sample_rate=self.config.tts_sample_rate  # 采样率
+)
+
+# audio_response 是原始 PCM 音频数据 (bytes)
+# 格式: L16 PCM, Big-endian, 16-bit
+# 采样率: 8000 Hz 或 16000 Hz
+```
+
+#### 步骤 2: 音频编码
+
+```python
+# Base64 编码音频数据
+audio_base64 = base64.b64encode(audio_response).decode('utf-8')
+
+# 示例输出:
+# "AAABAAEAAAAAAAAAAAEAAAABAAAAAQAAAAEAAAABAAAAAQAAAAEAAAABAAAAAgAAAA..."
+```
+
+#### 步骤 3: 封装 streamAudio 消息
+
+```python
+message = {
+    "type": "streamAudio",
+    "data": {
+        "audioDataType": "raw",  # 或 "wav", "mp3", "ogg"
+        "sampleRate": 8000,       # 必须匹配实际采样率
+        "audioData": audio_base64
+    }
+}
+```
+
+**消息字段说明**:
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `type` | string | 是 | 固定为 "streamAudio" |
+| `data.audioDataType` | string | 是 | 音频格式：raw/wav/mp3/ogg |
+| `data.sampleRate` | integer | 是* | 采样率（仅 raw 格式需要）|
+| `data.audioData` | string | 是 | Base64 编码的音频数据 |
+
+#### 步骤 4: WebSocket 发送
+
+```python
+# 转换为 JSON 字符串
+json_message = json.dumps(message)
+
+# 通过 WebSocket 发送（文本消息）
+await self.websocket.send(json_message)
+
+logger.info(f"音频已发送: {len(audio_response)} bytes")
+```
+
+#### 步骤 5: mod_audio_stream 接收处理
+
+mod_audio_stream 模块会自动：
+
+1. **接收 JSON 消息**
+2. **解析 streamAudio 类型**
+3. **Base64 解码音频数据**
+4. **根据 audioDataType 创建临时文件**:
+   - `raw`: `/tmp/freeswitch/audio_xxxxx.r8` (8kHz) 或 `.r16` (16kHz)
+   - `wav`: `/tmp/freeswitch/audio_xxxxx.wav`
+   - `mp3`: `/tmp/freeswitch/audio_xxxxx.mp3`
+5. **触发 `mod_audio_stream::play` 事件**，包含文件路径
+6. **应用程序监听事件并使用 `uuid_broadcast` 播放**
+
+### A.3 完整代码示例
+
+#### WebSocket AI 服务端（发送 TTS 音频）
+
+```python
+class SessionHandler:
+    async def _process_speech(self):
+        """完整的对话处理流程"""
+        
+        # 1. STT: 语音识别
+        text = await self.stt_adapter.transcribe(
+            audio_data,
+            sample_rate=8000,
+            language="zh-CN"
+        )
+        
+        # 2. LLM: 对话生成
+        self.conversation_history.append({
+            "role": "user",
+            "content": text
+        })
+        
+        response = await self.llm_adapter.chat(
+            messages=self.conversation_history
+        )
+        
+        self.conversation_history.append({
+            "role": "assistant",
+            "content": response
+        })
+        
+        # 3. TTS: 文本转语音
+        audio_data = await self.tts_adapter.synthesize(
+            text=response,
+            voice="longxiaochun",
+            sample_rate=8000
+        )
+        
+        # 4. 发送音频到 mod_audio_stream
+        await self.send_audio(audio_data)
+    
+    async def send_audio(self, audio_data: bytes):
+        """发送音频到 mod_audio_stream"""
+        
+        # Base64 编码
+        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+        
+        # 构建 streamAudio 消息
+        message = {
+            "type": "streamAudio",
+            "data": {
+                "audioDataType": "raw",
+                "sampleRate": self.config.tts_sample_rate,
+                "audioData": audio_base64
+            }
+        }
+        
+        # 发送
+        await self.websocket.send(json.dumps(message))
+        
+        logger.info(f"[{self.session_id}] TTS 音频已发送到 mod_audio_stream: "
+                   f"{len(audio_data)} bytes, "
+                   f"采样率: {self.config.tts_sample_rate} Hz")
+```
+
+#### FreeSWITCH 端（接收并播放）
+
+**方式 1: 使用 Python ESL 自动播放**
+
+```python
+import ESL
+import json
+
+# 连接到 FreeSWITCH
+con = ESL.ESLconnection("localhost", "8021", "ClueCon")
+
+# 订阅播放事件
+con.events("plain", "CUSTOM mod_audio_stream::play")
+
+while True:
+    e = con.recvEvent()
+    
+    if e:
+        event_subclass = e.getHeader("Event-Subclass")
+        
+        if event_subclass == "mod_audio_stream::play":
+            uuid = e.getHeader("Unique-ID")
+            body = e.getBody()
+            
+            # 解析事件数据
+            data = json.loads(body)
+            file_path = data.get("file")
+            
+            print(f"收到 TTS 音频: {file_path}")
+            
+            # 播放音频到通道
+            con.api(f"uuid_broadcast {uuid} {file_path} both")
+            print(f"正在播放 TTS 音频到通道 {uuid}")
+```
+
+**方式 2: 使用 Lua 脚本自动播放**
+
+```lua
+-- /usr/share/freeswitch/scripts/auto_play_tts.lua
+
+local con = freeswitch.EventConsumer("CUSTOM", "mod_audio_stream::play")
+local uuid = session:getVariable("uuid")
+
+while session:ready() do
+    local event = con:pop(1)  -- 等待 1 秒
+    
+    if event then
+        local event_uuid = event:getHeader("Unique-ID")
+        
+        if event_uuid == uuid then
+            local body = event:getBody()
+            local cjson = require("cjson")
+            local data = cjson.decode(body)
+            
+            if data.file then
+                freeswitch.consoleLog("info", "播放 TTS 音频: " .. data.file .. "\n")
+                session:streamFile(data.file)
+            end
+        end
+    end
+end
+```
+
+**拨号计划配置**:
+
+```xml
+<extension name="ai_assistant_with_auto_play">
+  <condition field="destination_number" expression="^9999$">
+    <action application="answer"/>
+    
+    <!-- 启动音频流 -->
+    <action application="uuid_audio_stream" 
+            data="${uuid} start ws://ai-service:8080/stream mono 8k"/>
+    
+    <!-- 运行 Lua 脚本处理自动播放 -->
+    <action application="lua" data="auto_play_tts.lua"/>
+    
+    <!-- 停止音频流 -->
+    <action application="uuid_audio_stream" data="${uuid} stop"/>
+    
+    <action application="hangup"/>
+  </condition>
+</extension>
+```
+
+### A.4 音频格式转换
+
+如果需要发送不同格式的音频：
+
+#### WAV 格式
+
+```python
+import io
+import wave
+
+def pcm_to_wav(pcm_data: bytes, sample_rate: int) -> bytes:
+    """将 PCM 转换为 WAV 格式"""
+    
+    wav_buffer = io.BytesIO()
+    
+    with wave.open(wav_buffer, 'wb') as wav_file:
+        wav_file.setnchannels(1)      # 单声道
+        wav_file.setsampwidth(2)      # 16-bit
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_data)
+    
+    return wav_buffer.getvalue()
+
+# 使用
+wav_data = pcm_to_wav(audio_data, 8000)
+
+message = {
+    "type": "streamAudio",
+    "data": {
+        "audioDataType": "wav",
+        "audioData": base64.b64encode(wav_data).decode('utf-8')
+    }
+}
+```
+
+#### MP3 格式（需要 pydub）
+
+```python
+from pydub import AudioSegment
+import io
+
+def pcm_to_mp3(pcm_data: bytes, sample_rate: int) -> bytes:
+    """将 PCM 转换为 MP3 格式"""
+    
+    # 创建 AudioSegment
+    audio = AudioSegment(
+        data=pcm_data,
+        sample_width=2,
+        frame_rate=sample_rate,
+        channels=1
+    )
+    
+    # 导出为 MP3
+    mp3_buffer = io.BytesIO()
+    audio.export(mp3_buffer, format="mp3", bitrate="32k")
+    
+    return mp3_buffer.getvalue()
+
+# 使用
+mp3_data = pcm_to_mp3(audio_data, 8000)
+
+message = {
+    "type": "streamAudio",
+    "data": {
+        "audioDataType": "mp3",
+        "audioData": base64.b64encode(mp3_data).decode('utf-8')
+    }
+}
+```
+
+### A.5 性能优化
+
+#### 1. 流式传输（大音频）
+
+对于长音频，可以分块发送：
+
+```python
+async def send_audio_chunked(self, audio_data: bytes, chunk_size: int = 32000):
+    """分块发送大音频"""
+    
+    total_size = len(audio_data)
+    chunks = [audio_data[i:i+chunk_size] for i in range(0, total_size, chunk_size)]
+    
+    logger.info(f"分块发送音频: {len(chunks)} 块, 总大小: {total_size} bytes")
+    
+    for i, chunk in enumerate(chunks):
+        await self.send_audio(chunk)
+        
+        # 控制发送速率，避免缓冲区溢出
+        if i < len(chunks) - 1:
+            await asyncio.sleep(0.1)
+```
+
+#### 2. 压缩传输
+
+使用 MP3 格式可以显著减少传输数据量：
+
+```python
+# Raw PCM: ~128 KB/s (8kHz, 16-bit)
+# MP3 (32kbps): ~4 KB/s
+
+# 对于 10 秒音频:
+# PCM: 1.28 MB
+# MP3: 40 KB
+
+# 节省带宽: ~97%
+```
+
+#### 3. 异步处理
+
+```python
+async def process_and_send_tts(self, text: str):
+    """异步 TTS 处理"""
+    
+    # TTS 和其他操作可以并行
+    tts_task = asyncio.create_task(
+        self.tts_adapter.synthesize(text)
+    )
+    
+    # 同时执行其他任务
+    # ...
+    
+    # 等待 TTS 完成
+    audio_data = await tts_task
+    await self.send_audio(audio_data)
+```
+
+### A.6 错误处理
+
+```python
+async def send_audio_safe(self, audio_data: bytes):
+    """带错误处理的音频发送"""
+    
+    try:
+        # 验证音频数据
+        if not audio_data or len(audio_data) == 0:
+            logger.warning("音频数据为空，跳过发送")
+            return False
+        
+        # 检查大小限制
+        max_size = 10 * 1024 * 1024  # 10MB
+        if len(audio_data) > max_size:
+            logger.error(f"音频数据过大: {len(audio_data)} bytes")
+            return False
+        
+        # Base64 编码
+        try:
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+        except Exception as e:
+            logger.error(f"Base64 编码失败: {e}")
+            return False
+        
+        # 构建消息
+        message = {
+            "type": "streamAudio",
+            "data": {
+                "audioDataType": "raw",
+                "sampleRate": self.config.tts_sample_rate,
+                "audioData": audio_base64
+            }
+        }
+        
+        # 发送
+        try:
+            await asyncio.wait_for(
+                self.websocket.send(json.dumps(message)),
+                timeout=5.0  # 5秒超时
+            )
+            logger.info(f"音频已发送: {len(audio_data)} bytes")
+            return True
+            
+        except asyncio.TimeoutError:
+            logger.error("发送音频超时")
+            return False
+            
+        except Exception as e:
+            logger.error(f"发送音频失败: {e}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"音频发送错误: {e}", exc_info=True)
+        return False
+```
+
+### A.7 调试和测试
+
+#### 测试音频发送
+
+```python
+import asyncio
+import websockets
+import json
+import base64
+
+async def test_send_tts_audio():
+    """测试 TTS 音频发送"""
+    
+    # 连接到 WebSocket 服务
+    uri = "ws://localhost:8080/stream"
+    
+    async with websockets.connect(uri) as websocket:
+        print("已连接到服务器")
+        
+        # 生成测试音频（1秒静音）
+        sample_rate = 8000
+        duration = 1.0
+        num_samples = int(sample_rate * duration)
+        test_audio = b'\x00' * (num_samples * 2)  # 16-bit
+        
+        # 编码
+        audio_base64 = base64.b64encode(test_audio).decode('utf-8')
+        
+        # 构建消息
+        message = {
+            "type": "streamAudio",
+            "data": {
+                "audioDataType": "raw",
+                "sampleRate": sample_rate,
+                "audioData": audio_base64
+            }
+        }
+        
+        # 发送
+        await websocket.send(json.dumps(message))
+        print(f"测试音频已发送: {len(test_audio)} bytes")
+        
+        # 等待响应
+        response = await websocket.recv()
+        print(f"收到响应: {response[:100]}...")
+
+# 运行测试
+asyncio.run(test_send_tts_audio())
+```
+
+#### 验证音频质量
+
+```python
+import numpy as np
+
+def validate_audio_quality(audio_data: bytes, sample_rate: int):
+    """验证音频质量"""
+    
+    # 转换为 numpy 数组
+    audio_array = np.frombuffer(audio_data, dtype=np.int16)
+    
+    # 检查音量
+    rms = np.sqrt(np.mean(audio_array.astype(float)**2))
+    print(f"RMS 音量: {rms:.2f}")
+    
+    # 检查是否有削波
+    max_val = np.max(np.abs(audio_array))
+    if max_val >= 32767:
+        print("警告: 检测到音频削波")
+    
+    # 检查是否为静音
+    if rms < 100:
+        print("警告: 音频可能为静音")
+    
+    # 检查时长
+    duration = len(audio_array) / sample_rate
+    print(f"音频时长: {duration:.2f} 秒")
+    
+    return {
+        "rms": rms,
+        "max_amplitude": max_val,
+        "duration": duration,
+        "is_clipping": max_val >= 32767,
+        "is_silent": rms < 100
+    }
+```
+
+### A.8 常见问题
+
+#### Q1: 音频没有播放？
+
+**检查清单**:
+1. 确认 WebSocket 连接正常
+2. 验证 streamAudio 消息格式正确
+3. 检查 mod_audio_stream::play 事件是否触发
+4. 确认 FreeSWITCH 通道仍然活跃
+5. 验证音频数据不为空
+
+```python
+# 添加调试日志
+logger.debug(f"音频大小: {len(audio_data)} bytes")
+logger.debug(f"采样率: {sample_rate} Hz")
+logger.debug(f"Base64 大小: {len(audio_base64)} chars")
+```
+
+#### Q2: 音频质量差或有噪音？
+
+**可能原因**:
+1. 采样率不匹配
+2. 字节序错误
+3. 音频数据损坏
+
+**解决方案**:
+```python
+# 确保采样率匹配
+tts_sample_rate = 8000
+message["data"]["sampleRate"] = tts_sample_rate
+
+# 验证音频格式
+if audioDataType == "raw":
+    # PCM 必须是 16-bit, Big-endian
+    # 确保 TTS 返回的是正确格式
+```
+
+#### Q3: 发送大音频导致延迟？
+
+**解决方案**: 使用流式传输或压缩格式
+
+```python
+# 方案 1: 分块发送
+await send_audio_chunked(audio_data, chunk_size=16000)
+
+# 方案 2: 使用压缩格式
+mp3_data = convert_to_mp3(audio_data)
+message["data"]["audioDataType"] = "mp3"
+```
+
+### A.9 总结
+
+TTS 音频流传输到 mod_audio_stream 的关键点：
+
+1. ✅ **TTS 生成**: 获取 PCM 格式音频数据
+2. ✅ **Base64 编码**: 将二进制数据编码为文本
+3. ✅ **streamAudio 封装**: 构建符合规范的 JSON 消息
+4. ✅ **WebSocket 发送**: 通过 WebSocket 传输到 mod_audio_stream
+5. ✅ **自动播放**: mod_audio_stream 触发事件，应用程序播放
+
+整个流程已在设计文档中完整实现，支持多种音频格式，具有良好的错误处理和性能优化。
+
+---
 ## 总结
 
 本设计文档详细描述了一个基于 Python 的 WebSocket AI 对话服务的完整实现方案。主要特点：
@@ -2237,4 +2828,4 @@ if len(audio_data) > MAX_AUDIO_SIZE:
 
 **版权声明**: 本文档遵循 MIT 许可证
 
-**最后更新**: 2026-02-06
+**最后更新**: 2026-02-06 (v1.1.0 - 添加TTS音频流传输详解)
