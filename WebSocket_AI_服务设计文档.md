@@ -1,77 +1,101 @@
 
-# WebSocket AI 服务设计文档
+# WebSocket AI 对话服务完整设计文档
+
+## 文档信息
+
+- **文档版本**: 2.0.0
+- **创建日期**: 2026-02-06
+- **最后更新**: 2026-02-09
+- **作者**: AI Service Team
+- **更新内容**:
+  - 合并 FreeSWITCH mod_audio_stream 技术文档和 Python WebSocket 服务文档
+  - 添加术语表
+  - 优化文档结构，消除重复内容
+  - 完善用户打断功能文档
+  - 添加版本历史记录
+
+---
 
 ## 概述
 
-本文档描述了基于 FreeSWITCH `mod_audio_stream` 模块的 WebSocket AI 服务架构设计，该服务支持实时音频流传输、AI 语音交互以及用户侧打断功能。
+本设计文档描述了一个完整的 WebSocket AI 对话服务系统，该系统集成 FreeSWITCH `mod_audio_stream` 模块，实现端到端的实时语音对话 AI 解决方案。系统包含语音识别(STT)、大语言模型(LLM)和语音合成(TTS)三个核心组件，默认使用通义千问(Qwen)的服务。
 
-## 系统架构
+### 核心特性
 
-### 1. 核心组件
-
-#### 1.1 FreeSWITCH 模块 (mod_audio_stream)
-- 负责音频捕获和 WebSocket 连接管理
-- 支持全双工音频流传输（呼叫者 ↔ WebSocket 端点）
-- 提供音频重采样、缓冲管理和格式转换
-
-#### 1.2 WebSocket 客户端
-- 基于 libwsc 实现，符合 RFC-6455 标准
-- 支持 TLS/WSS 加密连接
-- 自动心跳保活机制
-
-#### 1.3 音频流处理器 (AudioStreamer)
-- 管理音频数据的编解码
-- 处理服务器返回的音频播放请求
-- 支持多种音频格式（raw, wav, mp3, ogg, pcmu, pcma）
-
-## 核心功能
-
-### 2. 双向音频流传输
-
-#### 2.1 上行音频流（呼叫者 → WebSocket）
-- **采样率**：支持 8kHz、16kHz、24kHz、32kHz、48kHz、64kHz
-- **音频通道**：
-  - `mono`：单声道，仅包含呼叫者音频
-  - `mixed`：单声道，混合呼叫者和被叫者音频
-  - `stereo`：立体声，呼叫者和被叫者分别在不同声道
-- **数据格式**：L16（线性 PCM）原始音频或 base64 编码
-- **缓冲机制**：可配置音频数据包大小（默认 20ms，可按 20ms 倍数调整）
-
-#### 2.2 下行音频流（WebSocket → 呼叫者）
-服务器通过 WebSocket 发送 JSON 消息，格式如下：
-=======
-# WebSocket AI 对话服务设计文档
-
-## 文档概述
-
-本设计文档描述了一个基于 Python 的 WebSocket 服务，该服务集成 mod_audio_stream，实现完整的语音对话 AI 系统。系统包含语音识别(STT)、大语言模型(LLM)和语音合成(TTS)三个核心组件，默认使用通义千问(Qwen)的服务。
-
-### 版本信息
-
-- **文档版本**: 1.1.0
-- **创建日期**: 2026-02-06
-- **最后更新**: 2026-02-06
-- **作者**: AI Service Team
-- **更新内容**: 添加附录A - TTS音频流传输详解
+- **实时音频处理**: 支持全双工音频流传输和处理
+- **模块化设计**: STT、LLM、TTS 可独立配置和替换
+- **异步架构**: 基于 asyncio，高并发支持
+- **用户打断功能**: 支持实时检测用户发言并打断 AI 播放
+- **VAD 支持**: 智能语音端点检测
+- **错误恢复**: 完善的异常处理和重连机制
+- **配置灵活**: 支持环境变量和配置文件
+- **日志完善**: 详细的调试和监控日志
 
 ---
 
 ## 目录
 
-1. [系统架构](#系统架构)
-2. [技术规范](#技术规范)
-3. [核心组件设计](#核心组件设计)
-4. [数据流设计](#数据流设计)
-5. [接口设计](#接口设计)
-6. [配置管理](#配置管理)
-7. [实现代码](#实现代码)
-8. [部署指南](#部署指南)
-9. [测试方案](#测试方案)
-10. [最佳实践](#最佳实践)
+1. [系统架构](#1-系统架构)
+   - 1.1 [整体架构](#11-整体架构图)
+   - 1.2 [核心组件](#12-核心组件)
+2. [FreeSWITCH 集成 (mod_audio_stream)](#2-freeswitch-集成-mod_audio_stream)
+   - 2.1 [模块概述](#21-模块概述)
+   - 2.2 [双向音频流传输](#22-双向音频流传输)
+   - 2.3 [音频播放管理](#23-音频播放管理)
+   - 2.4 [用户打断功能](#24-用户打断功能)
+   - 2.5 [事件机制](#25-事件机制)
+   - 2.6 [安全与性能](#26-安全与性能)
+   - 2.7 [配置参数](#27-配置参数)
+   - 2.8 [FreeSWITCH 拨号计划](#28-freeswitch-拨号计划)
+3. [技术规范](#3-技术规范)
+   - 3.1 [音频格式规范](#31-音频格式规范)
+   - 3.2 [WebSocket 协议](#32-websocket-协议)
+   - 3.3 [技术栈](#33-技术栈)
+4. [核心组件设计](#4-核心组件设计)
+   - 4.1 [WebSocket 服务器](#41-websocket-服务器)
+   - 4.2 [会话处理器](#42-会话处理器)
+   - 4.3 [STT 适配器](#43-stt-适配器)
+   - 4.4 [LLM 适配器](#44-llm-适配器)
+   - 4.5 [TTS 适配器](#45-tts-适配器)
+   - 4.6 [音频处理模块](#46-音频处理模块)
+5. [数据流设计](#5-数据流设计)
+   - 5.1 [完整对话流程](#51-完整对话流程)
+   - 5.2 [序列图](#52-序列图)
+6. [接口设计](#6-接口设计)
+   - 6.1 [配置接口](#61-配置接口)
+   - 6.2 [API 端点](#62-api-端点)
+7. [配置管理](#7-配置管理)
+   - 7.1 [环境变量配置](#71-环境变量配置)
+   - 7.2 [YAML 配置文件](#72-yaml-配置文件)
+8. [实现代码](#8-实现代码)
+   - 8.1 [项目结构](#81-项目结构)
+   - 8.2 [核心实现代码](#82-核心实现代码)
+   - 8.3 [requirements.txt](#83-requirementstxt)
+9. [部署指南](#9-部署指南)
+   - 9.1 [本地开发部署](#91-本地开发部署)
+   - 9.2 [Docker 部署](#92-docker-部署)
+   - 9.3 [生产环境部署](#93-生产环境部署)
+10. [测试方案](#10-测试方案)
+    - 10.1 [单元测试](#101-单元测试)
+    - 10.2 [集成测试](#102-集成测试)
+    - 10.3 [WebSocket 客户端测试](#103-websocket-客户端测试)
+11. [最佳实践](#11-最佳实践)
+    - 11.1 [性能优化](#111-性能优化)
+    - 11.2 [错误处理](#112-错误处理)
+    - 11.3 [监控和日志](#113-监控和日志)
+    - 11.4 [安全性](#114-安全性)
+    - 11.5 [用户打断功能优化](#115-用户打断功能优化)
+12. [故障排查](#12-故障排查)
+    - 12.1 [常见问题](#121-常见问题)
+    - 12.2 [调试建议](#122-调试建议)
+13. [术语表](#13-术语表)
+14. [附录A: TTS 音频流传输详解](#附录a-tts-音频流传输详解)
+15. [版本历史](#版本历史)
+16. [参考资料](#参考资料)
 
 ---
 
-## 系统架构
+## 1. 系统架构
 
 ### 1.1 整体架构图
 
@@ -125,21 +149,276 @@
 └─────────────────────────────────────────────────┘
 ```
 
-### 1.2 核心特性
+### 1.2 核心组件
 
-- ✅ **实时音频处理**: 支持流式音频接收和发送
-- ✅ **模块化设计**: STT、LLM、TTS 可独立配置和替换
-- ✅ **异步架构**: 基于 asyncio，高并发支持
-- ✅ **VAD 支持**: 智能语音端点检测
-- ✅ **错误恢复**: 完善的异常处理和重连机制
-- ✅ **配置灵活**: 支持环境变量和配置文件
-- ✅ **日志完善**: 详细的调试和监控日志
+#### 1.2.1 FreeSWITCH 模块 (mod_audio_stream)
+
+- 负责音频捕获和 WebSocket 连接管理
+- 支持全双工音频流传输（呼叫者 ↔ WebSocket 端点）
+- 提供音频重采样、缓冲管理和格式转换
+
+#### 1.2.2 WebSocket 客户端
+
+- 基于 libwsc 实现，符合 RFC-6455 标准
+- 支持 TLS/WSS 加密连接
+- 自动心跳保活机制
+
+#### 1.2.3 音频流处理器 (AudioStreamer)
+
+- 管理音频数据的编解码
+- 处理服务器返回的音频播放请求
+- 支持多种音频格式（raw, wav, mp3, ogg, pcmu, pcma）
 
 ---
 
-## 技术规范
+## 2. FreeSWITCH 集成 (mod_audio_stream)
 
-### 2.1 音频格式规范
+### 2.1 模块概述
+
+`mod_audio_stream` 是 FreeSWITCH 的音频流传输模块，它通过 WebSocket 连接将音频流实时传输到远程服务器，并接收服务器返回的音频进行播放。该模块特别适用于实时 AI 语音交互场景。
+
+### 2.2 双向音频流传输
+
+#### 2.2.1 上行音频流（呼叫者 → WebSocket）
+
+- **采样率**: 支持 8kHz、16kHz、24kHz、32kHz、48kHz、64kHz
+- **音频通道**:
+  - `mono`: 单声道，仅包含呼叫者音频
+  - `mixed`: 单声道，混合呼叫者和被叫者音频
+  - `stereo`: 立体声，呼叫者和被叫者分别在不同声道
+- **数据格式**: L16（线性 PCM）原始音频或 base64 编码
+- **缓冲机制**: 可配置音频数据包大小（默认 20ms，可按 20ms 倍数调整）
+
+#### 2.2.2 下行音频流（WebSocket → 呼叫者）
+
+服务器通过 WebSocket 发送 JSON 消息，格式如下：
+
+```json
+{
+  "type": "streamAudio",
+  "data": {
+    "audioDataType": "raw",
+    "sampleRate": 8000,
+    "audioData": "base64_encoded_pcm_data"
+  }
+}
+```
+
+**支持的 audioDataType**:
+- `raw` - 原始 PCM 数据（需指定 sampleRate）
+- `wav` - WAV 文件格式
+- `mp3` - MP3 压缩格式
+- `ogg` - OGG Vorbis 格式
+- `pcmu` - G.711 μ-law
+- `pcma` - G.711 A-law
+
+### 2.3 音频播放管理
+
+#### 2.3.1 播放流程
+
+1. WebSocket 服务器发送包含 base64 编码音频的 JSON 消息
+2. `AudioStreamer` 解析消息并验证音频格式
+3. 解码 base64 数据并写入临时文件
+4. 触发 `mod_audio_stream::play` 事件，携带文件路径
+5. FreeSWITCH 播放音频文件给呼叫者
+6. 播放完成后，临时文件在会话结束时自动删除
+
+#### 2.3.2 播放控制命令
+
+```bash
+# 暂停播放
+uuid_audio_stream <uuid> pause
+
+# 恢复播放
+uuid_audio_stream <uuid> resume
+
+# 停止流传输
+uuid_audio_stream <uuid> stop [metadata]
+```
+
+### 2.4 用户打断功能
+
+#### 2.4.1 功能描述
+
+在 AI 语音播放过程中，用户可以通过说话打断服务端的语音播放。系统检测到用户发言后：
+
+1. 立即中断当前正在播放的 AI 语音
+2. 开始采集用户的语音输入
+3. 将用户语音实时传输到 WebSocket 服务器
+4. 服务器端重新生成回复内容
+5. 继续播放新的 AI 回复
+
+#### 2.4.2 实现机制
+
+##### 音频活动检测（VAD）
+
+WebSocket 服务器端需要实现语音活动检测（Voice Activity Detection）：
+- 实时分析上行音频流，检测用户是否开始说话
+- 当检测到语音活动时，发送打断信号
+
+##### 播放中断流程
+
+**服务器端发送中断信号**:
+
+```json
+{
+  "type": "interruptPlayback",
+  "reason": "user_speaking"
+}
+```
+
+**FreeSWITCH 处理流程**:
+
+1. 接收到 `interruptPlayback` 消息后，调用 `uuid_break <uuid>` 中断当前播放
+2. 或使用 `uuid_audio_stream <uuid> pause` 暂停音频流
+3. 继续采集用户语音并发送到服务器
+
+##### 重新生成回复流程
+
+**用户说话完毕检测**:
+
+服务器端通过 VAD 检测到用户停止说话后：
+
+```json
+{
+  "type": "processingComplete",
+  "intent": "regenerate_response"
+}
+```
+
+**发送新的回复音频**:
+
+```json
+{
+  "type": "streamAudio",
+  "data": {
+    "audioDataType": "raw",
+    "sampleRate": 16000,
+    "audioData": "新生成的回复音频的base64编码",
+    "sequence": 1,
+    "isInterrupted": true
+  }
+}
+```
+
+#### 2.4.3 状态管理
+
+系统维护以下状态：
+
+- **IDLE**: 空闲状态，等待用户或服务器输入
+- **PLAYING**: 正在播放 AI 回复
+- **LISTENING**: 正在采集用户语音
+- **INTERRUPTED**: 播放被用户打断
+- **PROCESSING**: 服务器正在处理用户输入并生成回复
+
+状态转换流程:
+
+```
+IDLE → PLAYING → INTERRUPTED → LISTENING → PROCESSING → PLAYING
+                    ↓
+                  IDLE (用户未说话)
+```
+
+### 2.5 事件机制
+
+系统生成以下 FreeSWITCH 事件：
+
+| 事件类型 | 事件名称 | 说明 |
+|---------|---------|------|
+| 连接成功 | `mod_audio_stream::connect` | WebSocket 连接建立 |
+| 断开连接 | `mod_audio_stream::disconnect` | WebSocket 连接关闭 |
+| 连接错误 | `mod_audio_stream::error` | 连接或协议错误 |
+| JSON 消息 | `mod_audio_stream::json` | 收到 WebSocket 服务器响应 |
+| 播放音频 | `mod_audio_stream::play` | 开始播放音频文件 |
+
+### 2.6 安全与性能
+
+#### 2.6.1 安全特性
+
+- **TLS/WSS 支持**: 加密 WebSocket 连接
+- **证书验证**: 支持自定义 CA 证书、客户端证书和密钥
+- **主机名验证**: 可配置是否验证服务器证书主机名
+- **UTF-8 验证**: 所有文本消息必须是有效的 UTF-8 编码
+
+#### 2.6.2 性能优化
+
+- **压缩**: 支持 per-message-deflate 压缩（默认启用）
+- **缓冲管理**: 可配置音频缓冲大小，减少网络传输次数
+- **资源管理**:
+  - 使用 RAII 模式管理资源
+  - 线程安全的音频流处理
+  - 临时文件自动清理
+- **并发限制**: 社区版支持最多 10 个并发流通道
+
+#### 2.6.3 高并发支持
+
+商业版经过测试，支持：
+- 5000+ 并发呼叫
+- 正确的会话生命周期管理
+- 线程安全的音频注入和关闭
+- 有界且可预测的内存使用
+
+### 2.7 配置参数
+
+#### 通道变量
+
+| 变量名 | 说明 | 默认值 |
+|-------|------|--------|
+| `STREAM_MESSAGE_DEFLATE` | 禁用 per-message-deflate 压缩 | off |
+| `STREAM_HEART_BEAT` | 心跳间隔（秒） | off |
+| `STREAM_SUPPRESS_LOG` | 抑制日志输出 | off |
+| `STREAM_BUFFER_SIZE` | 缓冲时长（毫秒，必须是 20 的倍数） | 20 |
+| `STREAM_EXTRA_HEADERS` | 额外的 HTTP 头（JSON 格式） | none |
+| `STREAM_TLS_CA_FILE` | CA 证书文件路径 | SYSTEM |
+| `STREAM_TLS_KEY_FILE` | 客户端密钥文件 | none |
+| `STREAM_TLS_CERT_FILE` | 客户端证书文件 | none |
+| `STREAM_TLS_DISABLE_HOSTNAME_VALIDATION` | 禁用主机名验证 | false |
+
+### 2.8 FreeSWITCH 拨号计划
+
+#### 基本示例
+
+```xml
+<extension name="ai_assistant">
+  <condition field="destination_number" expression="^9999$">
+    <action application="answer"/>
+    <action application="set" data="STREAM_BUFFER_SIZE=60"/>
+    <action application="uuid_audio_stream"
+            data="${uuid} start wss://ai.example.com/assistant mono 16k"/>
+    <action application="park"/>
+  </condition>
+</extension>
+```
+
+#### 启动音频流传输
+
+```bash
+# 启动单声道 16kHz 音频流
+uuid_audio_stream <uuid> start wss://ai.example.com/stream mono 16k
+
+# 启动立体声 8kHz 音频流并发送元数据
+uuid_audio_stream <uuid> start wss://ai.example.com/stream stereo 8k '{"user":"alice","lang":"zh-CN"}'
+```
+
+#### 发送文本消息
+
+```bash
+# 向 WebSocket 服务器发送文本消息
+uuid_audio_stream <uuid> send_text '{"action":"get_weather","city":"Beijing"}'
+```
+
+#### 停止音频流
+
+```bash
+# 停止音频流并发送结束消息
+uuid_audio_stream <uuid> stop '{"reason":"user_hangup"}'
+```
+
+---
+
+## 3. 技术规范
+
+### 3.1 音频格式规范
 
 #### 输入音频格式（从 mod_audio_stream）
 
@@ -165,174 +444,15 @@
 }
 ```
 
-**支持的音频类型**：
-- `raw`：原始 PCM 数据（需指定采样率）
-- `wav`：WAV 格式
-- `mp3`：MP3 格式
-- `ogg`：Ogg Vorbis 格式
-- `pcmu`：G.711 μ-law
-- `pcma`：G.711 A-law
+**支持的音频类型**:
+- `raw`: 原始 PCM 数据（需指定采样率）
+- `wav`: WAV 格式
+- `mp3`: MP3 格式
+- `ogg`: Ogg Vorbis 格式
+- `pcmu`: G.711 μ-law
+- `pcma`: G.711 A-law
 
-### 3. 音频播放管理
-
-#### 3.1 播放流程
-1. WebSocket 服务器发送包含 base64 编码音频的 JSON 消息
-2. `AudioStreamer` 解析消息并验证音频格式
-3. 解码 base64 数据并写入临时文件
-4. 触发 `mod_audio_stream::play` 事件，携带文件路径
-5. FreeSWITCH 播放音频文件给呼叫者
-6. 播放完成后，临时文件在会话结束时自动删除
-
-#### 3.2 播放控制命令
-- **暂停播放**：`uuid_audio_stream <uuid> pause`
-- **恢复播放**：`uuid_audio_stream <uuid> resume`
-- **停止流传输**：`uuid_audio_stream <uuid> stop [metadata]`
-
-### 4. 用户侧打断功能
-
-#### 4.1 功能描述
-在 AI 语音播放过程中，用户可以通过说话打断服务端的语音播放。系统检测到用户发言后：
-1. 立即中断当前正在播放的 AI 语音
-2. 开始采集用户的语音输入
-3. 将用户语音实时传输到 WebSocket 服务器
-4. 服务器端重新生成回复内容
-5. 继续播放新的 AI 回复
-
-#### 4.2 实现机制
-
-##### 4.2.1 音频活动检测（VAD）
-WebSocket 服务器端需要实现语音活动检测（Voice Activity Detection）：
-- 实时分析上行音频流，检测用户是否开始说话
-- 当检测到语音活动时，发送打断信号
-
-##### 4.2.2 播放中断流程
-
-**服务器端发送中断信号**：
-```json
-{
-  "type": "interruptPlayback",
-  "reason": "user_speaking"
-}
-```
-
-**FreeSWITCH 处理流程**：
-1. 接收到 `interruptPlayback` 消息后，调用 `uuid_break <uuid>` 中断当前播放
-2. 或使用 `uuid_audio_stream <uuid> pause` 暂停音频流
-3. 继续采集用户语音并发送到服务器
-
-##### 4.2.3 重新生成回复流程
-
-**用户说话完毕检测**：
-服务器端通过 VAD 检测到用户停止说话后：
-
-```json
-{
-  "type": "processingComplete",
-  "intent": "regenerate_response"
-}
-```
-
-**发送新的回复音频**：
-```json
-{
-  "type": "streamAudio",
-  "data": {
-    "audioDataType": "raw",
-    "sampleRate": 16000,
-    "audioData": "新生成的回复音频的base64编码",
-    "sequence": 1,
-    "isInterrupted": true
-  }
-}
-```
-
-#### 4.3 状态管理
-
-系统维护以下状态：
-- **IDLE**：空闲状态，等待用户或服务器输入
-- **PLAYING**：正在播放 AI 回复
-- **LISTENING**：正在采集用户语音
-- **INTERRUPTED**：播放被用户打断
-- **PROCESSING**：服务器正在处理用户输入并生成回复
-
-状态转换流程：
-```
-IDLE → PLAYING → INTERRUPTED → LISTENING → PROCESSING → PLAYING
-                    ↓
-                  IDLE (用户未说话)
-```
-
-### 5. 事件机制
-
-系统生成以下 FreeSWITCH 事件：
-
-| 事件类型 | 事件名称 | 说明 |
-|---------|---------|------|
-| 连接成功 | `mod_audio_stream::connect` | WebSocket 连接建立 |
-| 断开连接 | `mod_audio_stream::disconnect` | WebSocket 连接关闭 |
-| 连接错误 | `mod_audio_stream::error` | 连接或协议错误 |
-| JSON 消息 | `mod_audio_stream::json` | 收到 WebSocket 服务器响应 |
-| 播放音频 | `mod_audio_stream::play` | 开始播放音频文件 |
-
-### 6. 安全与性能
-
-#### 6.1 安全特性
-- **TLS/WSS 支持**：加密 WebSocket 连接
-- **证书验证**：支持自定义 CA 证书、客户端证书和密钥
-- **主机名验证**：可配置是否验证服务器证书主机名
-- **UTF-8 验证**：所有文本消息必须是有效的 UTF-8 编码
-
-#### 6.2 性能优化
-- **压缩**：支持 per-message-deflate 压缩（默认启用）
-- **缓冲管理**：可配置音频缓冲大小，减少网络传输次数
-- **资源管理**：
-  - 使用 RAII 模式管理资源
-  - 线程安全的音频流处理
-  - 临时文件自动清理
-- **并发限制**：社区版支持最多 10 个并发流通道
-
-#### 6.3 高并发支持
-商业版经过测试，支持：
-- 5000+ 并发呼叫
-- 正确的会话生命周期管理
-- 线程安全的音频注入和关闭
-- 有界且可预测的内存使用
-
-## 使用示例
-
-### 7.1 启动音频流传输
-
-```bash
-# 启动单声道 16kHz 音频流
-uuid_audio_stream <uuid> start wss://ai.example.com/stream mono 16k
-
-# 启动立体声 8kHz 音频流并发送元数据
-uuid_audio_stream <uuid> start wss://ai.example.com/stream stereo 8k '{"user":"alice","lang":"zh-CN"}'
-```
-
-### 7.2 实现打断功能的示例流程
-
-#### FreeSWITCH 拨号计划示例：
-```xml
-<extension name="ai_assistant">
-  <condition field="destination_number" expression="^9999$">
-    <action application="answer"/>
-    <action application="set" data="STREAM_BUFFER_SIZE=60"/>
-    <action application="uuid_audio_stream"
-            data="${uuid} start wss://ai.example.com/assistant mono 16k"/>
-    <action application="park"/>
-    "audioData": "base64_encoded_pcm_data"
-  }
-}
-```
-
-**支持的 audioDataType**:
-- `raw` - 原始 PCM 数据（需指定 sampleRate）
-- `wav` - WAV 文件格式
-- `mp3` - MP3 压缩格式
-- `ogg` - OGG Vorbis 格式
-
-### 2.2 WebSocket 协议
+### 3.2 WebSocket 协议
 
 #### 连接建立
 
@@ -344,6 +464,7 @@ wss://hostname:port/stream (SSL)
 #### 消息类型
 
 **1. 初始元数据（可选）**
+
 ```json
 {
   "session_id": "unique-session-id",
@@ -353,11 +474,13 @@ wss://hostname:port/stream (SSL)
 ```
 
 **2. 音频数据**
+
 - 类型: Binary
 - 格式: L16 PCM
 - 大小: 可变（通常 20ms-100ms 音频片段）
 
 **3. 文本消息**
+
 ```json
 {
   "type": "text",
@@ -365,7 +488,7 @@ wss://hostname:port/stream (SSL)
 }
 ```
 
-### 2.3 技术栈
+### 3.3 技术栈
 
 | 组件 | 技术选择 | 版本要求 |
 |------|---------|---------|
@@ -380,11 +503,12 @@ wss://hostname:port/stream (SSL)
 
 ---
 
-## 核心组件设计
+## 4. 核心组件设计
 
-### 3.1 WebSocket 服务器
+### 4.1 WebSocket 服务器
 
 #### 职责
+
 - 管理 WebSocket 连接
 - 接收和解析音频流
 - 协调各服务模块
@@ -395,26 +519,27 @@ wss://hostname:port/stream (SSL)
 ```python
 class AudioStreamServer:
     """WebSocket 音频流服务器"""
-    
+
     def __init__(self, host: str, port: int, config: dict):
         self.host = host
         self.port = port
         self.config = config
         self.sessions = {}  # session_id -> SessionHandler
-        
+
     async def start(self):
         """启动服务器"""
-        
+
     async def handle_connection(self, websocket, path):
         """处理 WebSocket 连接"""
-        
+
     async def stop(self):
         """停止服务器"""
 ```
 
-### 3.2 会话处理器
+### 4.2 会话处理器
 
 #### 职责
+
 - 管理单个会话的生命周期
 - 音频缓冲和 VAD 处理
 - 协调 STT → LLM → TTS 流程
@@ -424,48 +549,48 @@ class AudioStreamServer:
 ```python
 class SessionHandler:
     """会话处理器"""
-    
+
     def __init__(self, websocket, session_id: str, config: dict):
         self.websocket = websocket
         self.session_id = session_id
         self.config = config
-        
+
         # 服务适配器
         self.stt_adapter = STTAdapter.create(config)
         self.llm_adapter = LLMAdapter.create(config)
         self.tts_adapter = TTSAdapter.create(config)
-        
+
         # 音频处理
         self.audio_buffer = AudioBuffer()
         self.vad = VADProcessor()
-        
+
     async def handle_audio(self, audio_data: bytes):
         """处理接收到的音频数据"""
-        
+
     async def process_conversation(self, text: str):
         """处理对话流程: LLM -> TTS -> 发送"""
 ```
 
-### 3.3 STT 适配器
+### 4.3 STT 适配器
 
 #### 接口设计
 
 ```python
 class STTAdapter(ABC):
     """STT 服务抽象基类"""
-    
+
     @abstractmethod
-    async def transcribe(self, audio_data: bytes, 
-                        sample_rate: int, 
+    async def transcribe(self, audio_data: bytes,
+                        sample_rate: int,
                         language: str = "zh-CN") -> str:
         """
         转录音频为文本
-        
+
         参数:
             audio_data: 音频数据 (PCM)
             sample_rate: 采样率
             language: 语言代码
-            
+
         返回:
             识别的文本
         """
@@ -477,57 +602,57 @@ class STTAdapter(ABC):
 ```python
 class QwenSTTAdapter(STTAdapter):
     """通义千问 STT 适配器"""
-    
+
     def __init__(self, api_key: str, endpoint: str):
         self.api_key = api_key
         self.endpoint = endpoint
         self.session = aiohttp.ClientSession()
-        
-    async def transcribe(self, audio_data: bytes, 
-                        sample_rate: int, 
+
+    async def transcribe(self, audio_data: bytes,
+                        sample_rate: int,
                         language: str = "zh-CN") -> str:
         """使用 Qwen API 进行语音识别"""
-        
+
         # 转换音频格式
         wav_data = self._convert_to_wav(audio_data, sample_rate)
-        
+
         # 调用 Qwen API
         url = f"{self.endpoint}/audio/transcriptions"
-        
+
         form = aiohttp.FormData()
-        form.add_field('file', wav_data, 
+        form.add_field('file', wav_data,
                       filename='audio.wav',
                       content_type='audio/wav')
         form.add_field('model', 'qwen-audio-turbo')
         form.add_field('language', language)
-        
+
         headers = {
             'Authorization': f'Bearer {self.api_key}'
         }
-        
+
         async with self.session.post(url, data=form, headers=headers) as resp:
             result = await resp.json()
             return result.get('text', '')
 ```
 
-### 3.4 LLM 适配器
+### 4.4 LLM 适配器
 
 #### 接口设计
 
 ```python
 class LLMAdapter(ABC):
     """LLM 服务抽象基类"""
-    
+
     @abstractmethod
-    async def chat(self, messages: List[dict], 
+    async def chat(self, messages: List[dict],
                    system_prompt: str = None) -> str:
         """
         对话生成
-        
+
         参数:
             messages: 对话历史 [{"role": "user", "content": "..."}]
             system_prompt: 系统提示词
-            
+
         返回:
             AI 回复
         """
@@ -539,17 +664,17 @@ class LLMAdapter(ABC):
 ```python
 class QwenLLMAdapter(LLMAdapter):
     """通义千问 LLM 适配器"""
-    
+
     def __init__(self, api_key: str, model: str = "qwen-turbo"):
         self.api_key = api_key
         self.model = model
         self.session = aiohttp.ClientSession()
         self.endpoint = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-        
-    async def chat(self, messages: List[dict], 
+
+    async def chat(self, messages: List[dict],
                    system_prompt: str = None) -> str:
         """使用 Qwen API 进行对话"""
-        
+
         # 构建请求
         payload = {
             "model": self.model,
@@ -560,45 +685,45 @@ class QwenLLMAdapter(LLMAdapter):
                 "result_format": "message"
             }
         }
-        
+
         if system_prompt:
             payload["input"]["messages"].insert(0, {
                 "role": "system",
                 "content": system_prompt
             })
-        
+
         headers = {
             'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json'
         }
-        
-        async with self.session.post(self.endpoint, 
-                                    json=payload, 
+
+        async with self.session.post(self.endpoint,
+                                    json=payload,
                                     headers=headers) as resp:
             result = await resp.json()
             return result['output']['choices'][0]['message']['content']
 ```
 
-### 3.5 TTS 适配器
+### 4.5 TTS 适配器
 
 #### 接口设计
 
 ```python
 class TTSAdapter(ABC):
     """TTS 服务抽象基类"""
-    
+
     @abstractmethod
-    async def synthesize(self, text: str, 
+    async def synthesize(self, text: str,
                         voice: str = "default",
                         sample_rate: int = 8000) -> bytes:
         """
         文本转语音
-        
+
         参数:
             text: 要合成的文本
             voice: 语音名称
             sample_rate: 采样率
-            
+
         返回:
             音频数据 (PCM)
         """
@@ -610,18 +735,18 @@ class TTSAdapter(ABC):
 ```python
 class QwenTTSAdapter(TTSAdapter):
     """通义千问 TTS 适配器"""
-    
+
     def __init__(self, api_key: str, model: str = "cosyvoice-v1"):
         self.api_key = api_key
         self.model = model
         self.session = aiohttp.ClientSession()
         self.endpoint = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/synthesis"
-        
-    async def synthesize(self, text: str, 
+
+    async def synthesize(self, text: str,
                         voice: str = "longxiaochun",
                         sample_rate: int = 8000) -> bytes:
         """使用 Qwen API 进行语音合成"""
-        
+
         payload = {
             "model": self.model,
             "input": {
@@ -633,46 +758,46 @@ class QwenTTSAdapter(TTSAdapter):
                 "sample_rate": sample_rate
             }
         }
-        
+
         headers = {
             'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json'
         }
-        
-        async with self.session.post(self.endpoint, 
-                                    json=payload, 
+
+        async with self.session.post(self.endpoint,
+                                    json=payload,
                                     headers=headers) as resp:
             audio_data = await resp.read()
             return audio_data
 ```
 
-### 3.6 音频处理模块
+### 4.6 音频处理模块
 
 #### 音频缓冲器
 
 ```python
 class AudioBuffer:
     """音频缓冲器"""
-    
+
     def __init__(self, sample_rate: int = 8000):
         self.sample_rate = sample_rate
         self.buffer = bytearray()
         self.min_duration = 0.5  # 最小缓冲时长（秒）
-        
+
     def append(self, data: bytes):
         """添加音频数据"""
         self.buffer.extend(data)
-        
+
     def get_duration(self) -> float:
         """获取缓冲区音频时长"""
         # L16 PCM: 2 bytes per sample
         samples = len(self.buffer) // 2
         return samples / self.sample_rate
-        
+
     def is_ready(self) -> bool:
         """是否有足够的音频可处理"""
         return self.get_duration() >= self.min_duration
-        
+
     def get_and_clear(self) -> bytes:
         """获取并清空缓冲区"""
         data = bytes(self.buffer)
@@ -687,81 +812,81 @@ import webrtcvad
 
 class VADProcessor:
     """语音活动检测"""
-    
+
     def __init__(self, sample_rate: int = 8000, aggressiveness: int = 2):
         self.vad = webrtcvad.Vad(aggressiveness)
         self.sample_rate = sample_rate
         self.frame_duration = 30  # ms
         self.frame_size = int(sample_rate * self.frame_duration / 1000) * 2
-        
+
         # 状态管理
         self.is_speaking = False
         self.silence_frames = 0
         self.speech_frames = 0
         self.max_silence_frames = 20  # 600ms 静音后结束
-        
+
     def process_frame(self, frame: bytes) -> tuple[bool, bool]:
         """
         处理音频帧
-        
+
         返回:
             (is_speech, speech_ended)
         """
         # 检测是否为语音
         is_speech = self.vad.is_speech(frame, self.sample_rate)
-        
+
         if is_speech:
             self.speech_frames += 1
             self.silence_frames = 0
-            
+
             if not self.is_speaking and self.speech_frames >= 3:
                 # 开始说话
                 self.is_speaking = True
         else:
             self.silence_frames += 1
-            
+
             if self.is_speaking and self.silence_frames >= self.max_silence_frames:
                 # 结束说话
                 self.is_speaking = False
                 self.speech_frames = 0
                 return (False, True)  # 语音结束
-        
+
         return (is_speech, False)
 ```
 
 ---
 
-## 数据流设计
+## 5. 数据流设计
 
-### 4.1 完整对话流程
+### 5.1 完整对话流程
 
 ```
 1. 连接建立
    FreeSWITCH → WebSocket 连接 → AI 服务
-   
+
 2. 音频接收
    mod_audio_stream → Binary Audio (L16 PCM) → AudioBuffer
-   
+
 3. VAD 检测
    AudioBuffer → VAD → 检测到语音结束
-   
+
 4. 语音识别
    音频数据 → STT Adapter → 文本
-   
+
 5. LLM 处理
    文本 → LLM Adapter → AI 回复
-   
+
 6. 语音合成
    AI 回复 → TTS Adapter → 音频数据
-   
+
 7. 音频发送
    音频数据 → Base64 编码 → streamAudio JSON → mod_audio_stream
-   
+
 8. 播放
    mod_audio_stream → FreeSWITCH → 播放给呼叫者
 ```
 
-### 4.2 序列图
+### 5.2 序列图
 
 ```
 ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────┐  ┌─────┐  ┌─────┐
@@ -813,28 +938,28 @@ class VADProcessor:
 
 ---
 
-## 接口设计
+## 6. 接口设计
 
-### 5.1 配置接口
+### 6.1 配置接口
 
 ```python
 @dataclass
 class ServiceConfig:
     """服务配置"""
-    
+
     # 服务器配置
     host: str = "0.0.0.0"
     port: int = 8080
     ssl_cert: Optional[str] = None
     ssl_key: Optional[str] = None
-    
+
     # STT 配置
     stt_provider: str = "qwen"  # qwen, google, azure
     stt_api_key: str = ""
     stt_endpoint: str = ""
     stt_model: str = "qwen-audio-turbo"
     stt_language: str = "zh-CN"
-    
+
     # LLM 配置
     llm_provider: str = "qwen"  # qwen, openai, claude
     llm_api_key: str = ""
@@ -842,7 +967,7 @@ class ServiceConfig:
     llm_system_prompt: str = "你是一个友好的AI助手。"
     llm_temperature: float = 0.7
     llm_max_tokens: int = 2000
-    
+
     # TTS 配置
     tts_provider: str = "qwen"  # qwen, azure, google
     tts_api_key: str = ""
@@ -850,28 +975,28 @@ class ServiceConfig:
     tts_model: str = "cosyvoice-v1"
     tts_voice: str = "longxiaochun"
     tts_sample_rate: int = 8000
-    
+
     # 音频配置
     audio_sample_rate: int = 8000
     audio_channels: int = 1
     audio_format: str = "pcm"
-    
+
     # VAD 配置
     vad_enabled: bool = True
     vad_aggressiveness: int = 2
     vad_min_speech_duration: float = 0.5
     vad_max_silence_duration: float = 0.6
-    
+
     # 会话配置
     session_timeout: int = 300  # 秒
     max_conversation_turns: int = 50
-    
+
     # 日志配置
     log_level: str = "INFO"
     log_file: Optional[str] = None
 ```
 
-### 5.2 API 端点
+### 6.2 API 端点
 
 虽然主要是 WebSocket，但可以提供 HTTP 端点用于健康检查和配置：
 
@@ -905,9 +1030,9 @@ class ServiceConfig:
 
 ---
 
-## 配置管理
+## 7. 配置管理
 
-### 6.1 环境变量配置
+### 7.1 环境变量配置
 
 创建 `.env` 文件：
 
@@ -950,7 +1075,7 @@ LOG_LEVEL=INFO
 LOG_FILE=/var/log/websocket_ai_service.log
 ```
 
-### 6.2 YAML 配置文件
+### 7.2 YAML 配置文件
 
 创建 `config.yaml`:
 
@@ -1012,9 +1137,9 @@ logging:
 
 ---
 
-## 实现代码
+## 8. 实现代码
 
-### 7.1 项目结构
+### 8.1 项目结构
 
 ```
 websocket_ai_service/
@@ -1066,8 +1191,9 @@ websocket_ai_service/
     └── docker-compose.yml
 ```
 
+### 8.2 核心实现代码
 
-### 7.2 核心实现代码
+由于篇幅限制，这里仅展示关键文件的框架。完整实现代码请参考项目源代码。
 
 #### main.py
 
@@ -1092,22 +1218,22 @@ async def main():
     """主函数"""
     # 加载配置
     config = load_config()
-    
+
     # 创建服务器
     server = AudioStreamServer(
         host=config.host,
         port=config.port,
         config=config
     )
-    
+
     # 信号处理
     def signal_handler(sig, frame):
         logger.info("收到停止信号，正在关闭服务器...")
         asyncio.create_task(server.stop())
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     # 启动服务器
     try:
         logger.info(f"启动 WebSocket AI 服务: ws://{config.host}:{config.port}")
@@ -1124,839 +1250,21 @@ if __name__ == "__main__":
         logger.info("服务器已停止")
 ```
 
-#### src/server.py
+详细的实现代码包括：
 
-```python
-"""
-WebSocket 服务器实现
-"""
-import asyncio
-import logging
-import websockets
-from websockets.server import WebSocketServerProtocol
-from typing import Dict
+- `src/server.py`: WebSocket 服务器实现
+- `src/session.py`: 会话处理器实现
+- `src/config.py`: 配置管理
+- `src/adapters/stt/qwen.py`: Qwen STT 适配器
+- `src/adapters/llm/qwen.py`: Qwen LLM 适配器
+- `src/adapters/tts/qwen.py`: Qwen TTS 适配器
+- `src/audio/buffer.py`: 音频缓冲器
+- `src/audio/vad.py`: VAD 处理器
+- `src/utils/logger.py`: 日志工具
 
-from .session import SessionHandler
-from .config import ServiceConfig
+完整代码实现请参考第 4 章核心组件设计中的示例代码。
 
-logger = logging.getLogger(__name__)
-
-
-class AudioStreamServer:
-    """WebSocket 音频流服务器"""
-    
-    def __init__(self, host: str, port: int, config: ServiceConfig):
-        self.host = host
-        self.port = port
-        self.config = config
-        self.sessions: Dict[str, SessionHandler] = {}
-        self.server = None
-        
-    async def start(self):
-        """启动服务器"""
-        logger.info(f"启动服务器: {self.host}:{self.port}")
-        
-        async with websockets.serve(
-            self.handle_connection,
-            self.host,
-            self.port,
-            ping_interval=20,
-            ping_timeout=10
-        ):
-            await asyncio.Future()  # 永久运行
-            
-    async def handle_connection(self, websocket: WebSocketServerProtocol, path: str):
-        """处理 WebSocket 连接"""
-        session_id = None
-        
-        try:
-            # 获取远程地址
-            remote_addr = websocket.remote_address
-            logger.info(f"新连接来自: {remote_addr}")
-            
-            # 生成会话 ID
-            session_id = f"{remote_addr[0]}_{remote_addr[1]}_{id(websocket)}"
-            
-            # 创建会话处理器
-            session = SessionHandler(
-                websocket=websocket,
-                session_id=session_id,
-                config=self.config
-            )
-            
-            self.sessions[session_id] = session
-            logger.info(f"会话创建: {session_id}, 活跃会话数: {len(self.sessions)}")
-            
-            # 运行会话
-            await session.run()
-            
-        except websockets.exceptions.ConnectionClosed:
-            logger.info(f"连接关闭: {session_id}")
-        except Exception as e:
-            logger.error(f"会话错误 {session_id}: {e}", exc_info=True)
-        finally:
-            # 清理会话
-            if session_id and session_id in self.sessions:
-                await self.sessions[session_id].cleanup()
-                del self.sessions[session_id]
-                logger.info(f"会话清理: {session_id}, 剩余会话数: {len(self.sessions)}")
-                
-    async def stop(self):
-        """停止服务器"""
-        logger.info("停止所有会话...")
-        
-        # 清理所有会话
-        for session_id in list(self.sessions.keys()):
-            await self.sessions[session_id].cleanup()
-            
-        self.sessions.clear()
-        logger.info("服务器已停止")
-```
-
-#### src/session.py
-
-```python
-"""
-会话处理器实现
-"""
-import asyncio
-import base64
-import json
-import logging
-from typing import Optional
-from websockets.server import WebSocketServerProtocol
-
-from .config import ServiceConfig
-from .adapters.stt.qwen import QwenSTTAdapter
-from .adapters.llm.qwen import QwenLLMAdapter
-from .adapters.tts.qwen import QwenTTSAdapter
-from .audio.buffer import AudioBuffer
-from .audio.vad import VADProcessor
-
-logger = logging.getLogger(__name__)
-
-
-class SessionHandler:
-    """会话处理器"""
-    
-    def __init__(self, websocket: WebSocketServerProtocol, session_id: str, config: ServiceConfig):
-        self.websocket = websocket
-        self.session_id = session_id
-        self.config = config
-        
-        # 初始化适配器
-        self.stt_adapter = QwenSTTAdapter(
-            api_key=config.stt_api_key,
-            model=config.stt_model
-        )
-        
-        self.llm_adapter = QwenLLMAdapter(
-            api_key=config.llm_api_key,
-            model=config.llm_model,
-            system_prompt=config.llm_system_prompt
-        )
-        
-        self.tts_adapter = QwenTTSAdapter(
-            api_key=config.tts_api_key,
-            model=config.tts_model,
-            voice=config.tts_voice
-        )
-        
-        # 音频处理
-        self.audio_buffer = AudioBuffer(sample_rate=config.audio_sample_rate)
-        
-        if config.vad_enabled:
-            self.vad = VADProcessor(
-                sample_rate=config.audio_sample_rate,
-                aggressiveness=config.vad_aggressiveness
-            )
-        else:
-            self.vad = None
-            
-        # 对话历史
-        self.conversation_history = []
-        
-        # 状态
-        self.is_processing = False
-        
-    async def run(self):
-        """运行会话"""
-        logger.info(f"[{self.session_id}] 会话开始")
-        
-        try:
-            async for message in self.websocket:
-                await self.handle_message(message)
-        except Exception as e:
-            logger.error(f"[{self.session_id}] 会话错误: {e}", exc_info=True)
-            
-    async def handle_message(self, message):
-        """处理接收到的消息"""
-        
-        if isinstance(message, bytes):
-            # 二进制音频数据
-            await self.handle_audio(message)
-        elif isinstance(message, str):
-            # 文本消息（元数据）
-            try:
-                data = json.loads(message)
-                await self.handle_text_message(data)
-            except json.JSONDecodeError:
-                logger.warning(f"[{self.session_id}] 无效的 JSON 消息")
-                
-    async def handle_audio(self, audio_data: bytes):
-        """处理音频数据"""
-        
-        if self.is_processing:
-            # 正在处理，忽略新音频
-            return
-            
-        # 添加到缓冲区
-        self.audio_buffer.append(audio_data)
-        
-        # VAD 检测
-        if self.vad:
-            speech_ended = await self._check_vad(audio_data)
-            
-            if speech_ended:
-                # 检测到语音结束，处理
-                await self._process_speech()
-        else:
-            # 无 VAD，检查缓冲区是否足够
-            if self.audio_buffer.is_ready():
-                await self._process_speech()
-                
-    async def _check_vad(self, audio_data: bytes) -> bool:
-        """检查 VAD，返回是否语音结束"""
-        
-        # 将音频分帧处理
-        frame_size = self.vad.frame_size
-        
-        for i in range(0, len(audio_data), frame_size):
-            frame = audio_data[i:i+frame_size]
-            
-            if len(frame) == frame_size:
-                is_speech, speech_ended = self.vad.process_frame(frame)
-                
-                if speech_ended:
-                    return True
-                    
-        return False
-        
-    async def _process_speech(self):
-        """处理完整语音"""
-        
-        self.is_processing = True
-        
-        try:
-            # 获取音频数据
-            audio_data = self.audio_buffer.get_and_clear()
-            
-            if len(audio_data) == 0:
-                return
-                
-            logger.info(f"[{self.session_id}] 处理音频: {len(audio_data)} bytes")
-            
-            # 1. STT: 语音转文本
-            text = await self.stt_adapter.transcribe(
-                audio_data,
-                sample_rate=self.config.audio_sample_rate,
-                language=self.config.stt_language
-            )
-            
-            if not text or len(text.strip()) == 0:
-                logger.info(f"[{self.session_id}] 未识别到文本")
-                return
-                
-            logger.info(f"[{self.session_id}] STT 结果: {text}")
-            
-            # 2. LLM: 对话生成
-            self.conversation_history.append({
-                "role": "user",
-                "content": text
-            })
-            
-            response = await self.llm_adapter.chat(
-                messages=self.conversation_history,
-                temperature=self.config.llm_temperature,
-                max_tokens=self.config.llm_max_tokens
-            )
-            
-            logger.info(f"[{self.session_id}] LLM 回复: {response}")
-            
-            self.conversation_history.append({
-                "role": "assistant",
-                "content": response
-            })
-            
-            # 3. TTS: 文本转语音
-            audio_response = await self.tts_adapter.synthesize(
-                text=response,
-                voice=self.config.tts_voice,
-                sample_rate=self.config.tts_sample_rate
-            )
-            
-            logger.info(f"[{self.session_id}] TTS 生成: {len(audio_response)} bytes")
-            
-            # 4. 发送音频
-            await self.send_audio(audio_response)
-            
-        except Exception as e:
-            logger.error(f"[{self.session_id}] 处理语音错误: {e}", exc_info=True)
-        finally:
-            self.is_processing = False
-            
-    async def send_audio(self, audio_data: bytes):
-        """发送音频到客户端"""
-        
-        # Base64 编码
-        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-        
-        # 构建 streamAudio 消息
-        message = {
-            "type": "streamAudio",
-            "data": {
-                "audioDataType": "raw",
-                "sampleRate": self.config.tts_sample_rate,
-                "audioData": audio_base64
-            }
-        }
-        
-        # 发送
-        await self.websocket.send(json.dumps(message))
-        logger.info(f"[{self.session_id}] 音频已发送")
-        
-    async def handle_text_message(self, data: dict):
-        """处理文本消息"""
-        
-        msg_type = data.get("type")
-        
-        if msg_type == "text":
-            # 直接文本输入（用于调试）
-            content = data.get("content", "")
-            logger.info(f"[{self.session_id}] 收到文本: {content}")
-            
-            # 直接处理为对话
-            self.conversation_history.append({
-                "role": "user",
-                "content": content
-            })
-            
-            response = await self.llm_adapter.chat(
-                messages=self.conversation_history
-            )
-            
-            self.conversation_history.append({
-                "role": "assistant",
-                "content": response
-            })
-            
-            # TTS 并发送
-            audio_response = await self.tts_adapter.synthesize(
-                text=response,
-                voice=self.config.tts_voice,
-                sample_rate=self.config.tts_sample_rate
-            )
-            
-            await self.send_audio(audio_response)
-            
-    async def cleanup(self):
-        """清理会话资源"""
-        logger.info(f"[{self.session_id}] 清理会话")
-        
-        # 关闭适配器
-        if hasattr(self.stt_adapter, 'close'):
-            await self.stt_adapter.close()
-        if hasattr(self.llm_adapter, 'close'):
-            await self.llm_adapter.close()
-        if hasattr(self.tts_adapter, 'close'):
-            await self.tts_adapter.close()
-```
-
-#### src/config.py
-
-```python
-"""
-配置管理
-"""
-import os
-from dataclasses import dataclass, field
-from typing import Optional
-from dotenv import load_dotenv
-import yaml
-
-# 加载环境变量
-load_dotenv()
-
-
-@dataclass
-class ServiceConfig:
-    """服务配置"""
-    
-    # 服务器配置
-    host: str = field(default_factory=lambda: os.getenv("SERVER_HOST", "0.0.0.0"))
-    port: int = field(default_factory=lambda: int(os.getenv("SERVER_PORT", "8080")))
-    
-    # STT 配置
-    stt_provider: str = field(default_factory=lambda: os.getenv("STT_PROVIDER", "qwen"))
-    stt_api_key: str = field(default_factory=lambda: os.getenv("QWEN_API_KEY", ""))
-    stt_model: str = field(default_factory=lambda: os.getenv("STT_MODEL", "qwen-audio-turbo"))
-    stt_language: str = field(default_factory=lambda: os.getenv("STT_LANGUAGE", "zh-CN"))
-    
-    # LLM 配置
-    llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "qwen"))
-    llm_api_key: str = field(default_factory=lambda: os.getenv("QWEN_API_KEY", ""))
-    llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "qwen-turbo"))
-    llm_system_prompt: str = field(default_factory=lambda: os.getenv("LLM_SYSTEM_PROMPT", "你是一个友好的AI助手。"))
-    llm_temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7")))
-    llm_max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "2000")))
-    
-    # TTS 配置
-    tts_provider: str = field(default_factory=lambda: os.getenv("TTS_PROVIDER", "qwen"))
-    tts_api_key: str = field(default_factory=lambda: os.getenv("QWEN_API_KEY", ""))
-    tts_model: str = field(default_factory=lambda: os.getenv("TTS_MODEL", "cosyvoice-v1"))
-    tts_voice: str = field(default_factory=lambda: os.getenv("TTS_VOICE", "longxiaochun"))
-    tts_sample_rate: int = field(default_factory=lambda: int(os.getenv("TTS_SAMPLE_RATE", "8000")))
-    
-    # 音频配置
-    audio_sample_rate: int = field(default_factory=lambda: int(os.getenv("AUDIO_SAMPLE_RATE", "8000")))
-    audio_channels: int = field(default_factory=lambda: int(os.getenv("AUDIO_CHANNELS", "1")))
-    
-    # VAD 配置
-    vad_enabled: bool = field(default_factory=lambda: os.getenv("VAD_ENABLED", "true").lower() == "true")
-    vad_aggressiveness: int = field(default_factory=lambda: int(os.getenv("VAD_AGGRESSIVENESS", "2")))
-    
-    # 日志配置
-    log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
-    log_file: Optional[str] = field(default_factory=lambda: os.getenv("LOG_FILE"))
-
-
-def load_config(config_file: Optional[str] = None) -> ServiceConfig:
-    """加载配置"""
-    
-    if config_file and os.path.exists(config_file):
-        # 从 YAML 文件加载
-        with open(config_file, 'r', encoding='utf-8') as f:
-            config_data = yaml.safe_load(f)
-            
-        # TODO: 将 YAML 数据合并到配置对象
-        pass
-        
-    return ServiceConfig()
-```
-
-
-#### src/adapters/stt/qwen.py
-
-```python
-"""
-Qwen STT 适配器实现
-"""
-import asyncio
-import aiohttp
-import io
-import wave
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-class QwenSTTAdapter:
-    """通义千问 STT 适配器"""
-    
-    def __init__(self, api_key: str, model: str = "qwen-audio-turbo"):
-        self.api_key = api_key
-        self.model = model
-        self.endpoint = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
-        self.session = None
-        
-    async def _ensure_session(self):
-        """确保 HTTP 会话存在"""
-        if self.session is None:
-            self.session = aiohttp.ClientSession()
-            
-    async def transcribe(self, audio_data: bytes, sample_rate: int, language: str = "zh-CN") -> str:
-        """语音识别"""
-        
-        await self._ensure_session()
-        
-        try:
-            # 转换为 WAV 格式
-            wav_data = self._pcm_to_wav(audio_data, sample_rate)
-            
-            # 构建请求
-            form = aiohttp.FormData()
-            form.add_field('model', self.model)
-            form.add_field('file', wav_data, 
-                          filename='audio.wav',
-                          content_type='audio/wav')
-            form.add_field('language', language)
-            
-            headers = {
-                'Authorization': f'Bearer {self.api_key}'
-            }
-            
-            # 发送请求
-            async with self.session.post(self.endpoint, data=form, headers=headers) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    
-                    # 解析结果
-                    if 'output' in result and 'transcription' in result['output']:
-                        text = result['output']['transcription']
-                        return text
-                    else:
-                        logger.warning(f"STT 响应格式异常: {result}")
-                        return ""
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"STT 请求失败: {resp.status}, {error_text}")
-                    return ""
-                    
-        except Exception as e:
-            logger.error(f"STT 错误: {e}", exc_info=True)
-            return ""
-            
-    def _pcm_to_wav(self, pcm_data: bytes, sample_rate: int, channels: int = 1) -> bytes:
-        """将 PCM 数据转换为 WAV 格式"""
-        
-        wav_buffer = io.BytesIO()
-        
-        with wave.open(wav_buffer, 'wb') as wav_file:
-            wav_file.setnchannels(channels)
-            wav_file.setsampwidth(2)  # 16-bit
-            wav_file.setframerate(sample_rate)
-            wav_file.writeframes(pcm_data)
-            
-        return wav_buffer.getvalue()
-        
-    async def close(self):
-        """关闭会话"""
-        if self.session:
-            await self.session.close()
-            self.session = None
-```
-
-#### src/adapters/llm/qwen.py
-
-```python
-"""
-Qwen LLM 适配器实现
-"""
-import aiohttp
-import logging
-from typing import List, Dict, Optional
-
-logger = logging.getLogger(__name__)
-
-
-class QwenLLMAdapter:
-    """通义千问 LLM 适配器"""
-    
-    def __init__(self, api_key: str, model: str = "qwen-turbo", system_prompt: str = None):
-        self.api_key = api_key
-        self.model = model
-        self.system_prompt = system_prompt
-        self.endpoint = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-        self.session = None
-        
-    async def _ensure_session(self):
-        """确保 HTTP 会话存在"""
-        if self.session is None:
-            self.session = aiohttp.ClientSession()
-            
-    async def chat(self, messages: List[Dict[str, str]], 
-                   temperature: float = 0.7,
-                   max_tokens: int = 2000) -> str:
-        """对话生成"""
-        
-        await self._ensure_session()
-        
-        try:
-            # 准备消息
-            chat_messages = messages.copy()
-            
-            # 添加系统提示
-            if self.system_prompt and (not chat_messages or chat_messages[0].get("role") != "system"):
-                chat_messages.insert(0, {
-                    "role": "system",
-                    "content": self.system_prompt
-                })
-            
-            # 构建请求
-            payload = {
-                "model": self.model,
-                "input": {
-                    "messages": chat_messages
-                },
-                "parameters": {
-                    "result_format": "message",
-                    "temperature": temperature,
-                    "max_tokens": max_tokens
-                }
-            }
-            
-            headers = {
-                'Authorization': f'Bearer {self.api_key}',
-                'Content-Type': 'application/json'
-            }
-            
-            # 发送请求
-            async with self.session.post(self.endpoint, json=payload, headers=headers) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    
-                    # 解析结果
-                    if 'output' in result and 'choices' in result['output']:
-                        response_text = result['output']['choices'][0]['message']['content']
-                        return response_text
-                    else:
-                        logger.warning(f"LLM 响应格式异常: {result}")
-                        return "抱歉，我现在无法回答。"
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"LLM 请求失败: {resp.status}, {error_text}")
-                    return "抱歉，服务暂时不可用。"
-                    
-        except Exception as e:
-            logger.error(f"LLM 错误: {e}", exc_info=True)
-            return "抱歉，发生了错误。"
-            
-    async def close(self):
-        """关闭会话"""
-        if self.session:
-            await self.session.close()
-            self.session = None
-```
-
-#### src/adapters/tts/qwen.py
-
-```python
-"""
-Qwen TTS 适配器实现
-"""
-import aiohttp
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-class QwenTTSAdapter:
-    """通义千问 TTS 适配器"""
-    
-    def __init__(self, api_key: str, model: str = "cosyvoice-v1", voice: str = "longxiaochun"):
-        self.api_key = api_key
-        self.model = model
-        self.voice = voice
-        self.endpoint = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/synthesis"
-        self.session = None
-        
-    async def _ensure_session(self):
-        """确保 HTTP 会话存在"""
-        if self.session is None:
-            self.session = aiohttp.ClientSession()
-            
-    async def synthesize(self, text: str, voice: str = None, sample_rate: int = 8000) -> bytes:
-        """文本转语音"""
-        
-        await self._ensure_session()
-        
-        try:
-            # 使用指定的 voice 或默认 voice
-            voice_name = voice if voice else self.voice
-            
-            # 构建请求
-            payload = {
-                "model": self.model,
-                "input": {
-                    "text": text
-                },
-                "parameters": {
-                    "voice": voice_name,
-                    "format": "pcm",
-                    "sample_rate": sample_rate
-                }
-            }
-            
-            headers = {
-                'Authorization': f'Bearer {self.api_key}',
-                'Content-Type': 'application/json'
-            }
-            
-            # 发送请求
-            async with self.session.post(self.endpoint, json=payload, headers=headers) as resp:
-                if resp.status == 200:
-                    # 返回音频数据
-                    audio_data = await resp.read()
-                    return audio_data
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"TTS 请求失败: {resp.status}, {error_text}")
-                    return b""
-                    
-        except Exception as e:
-            logger.error(f"TTS 错误: {e}", exc_info=True)
-            return b""
-            
-    async def close(self):
-        """关闭会话"""
-        if self.session:
-            await self.session.close()
-            self.session = None
-```
-
-#### src/audio/buffer.py
-
-```python
-"""
-音频缓冲器
-"""
-
-
-class AudioBuffer:
-    """音频缓冲器"""
-    
-    def __init__(self, sample_rate: int = 8000, min_duration: float = 0.5):
-        self.sample_rate = sample_rate
-        self.min_duration = min_duration
-        self.buffer = bytearray()
-        
-    def append(self, data: bytes):
-        """添加音频数据"""
-        self.buffer.extend(data)
-        
-    def get_duration(self) -> float:
-        """获取缓冲区音频时长（秒）"""
-        # L16 PCM: 2 bytes per sample
-        samples = len(self.buffer) // 2
-        return samples / self.sample_rate
-        
-    def is_ready(self) -> bool:
-        """是否有足够的音频可处理"""
-        return self.get_duration() >= self.min_duration
-        
-    def get_and_clear(self) -> bytes:
-        """获取并清空缓冲区"""
-        data = bytes(self.buffer)
-        self.buffer.clear()
-        return data
-        
-    def clear(self):
-        """清空缓冲区"""
-        self.buffer.clear()
-```
-
-#### src/audio/vad.py
-
-```python
-"""
-VAD (语音活动检测) 处理器
-"""
-import webrtcvad
-
-
-class VADProcessor:
-    """语音活动检测"""
-    
-    def __init__(self, sample_rate: int = 8000, aggressiveness: int = 2):
-        """
-        初始化 VAD
-        
-        参数:
-            sample_rate: 采样率 (8000, 16000, 32000, 48000)
-            aggressiveness: 激进度 (0-3，越大越严格)
-        """
-        self.vad = webrtcvad.Vad(aggressiveness)
-        self.sample_rate = sample_rate
-        self.frame_duration = 30  # ms
-        self.frame_size = int(sample_rate * self.frame_duration / 1000) * 2  # bytes
-        
-        # 状态管理
-        self.is_speaking = False
-        self.silence_frames = 0
-        self.speech_frames = 0
-        self.max_silence_frames = 20  # 600ms 静音后结束
-        self.min_speech_frames = 3    # 90ms 语音后开始
-        
-    def process_frame(self, frame: bytes) -> tuple:
-        """
-        处理音频帧
-        
-        返回:
-            (is_speech, speech_ended)
-        """
-        
-        if len(frame) != self.frame_size:
-            return (False, False)
-            
-        # 检测是否为语音
-        try:
-            is_speech = self.vad.is_speech(frame, self.sample_rate)
-        except:
-            return (False, False)
-        
-        if is_speech:
-            self.speech_frames += 1
-            self.silence_frames = 0
-            
-            if not self.is_speaking and self.speech_frames >= self.min_speech_frames:
-                # 开始说话
-                self.is_speaking = True
-        else:
-            self.silence_frames += 1
-            
-            if self.is_speaking and self.silence_frames >= self.max_silence_frames:
-                # 结束说话
-                self.is_speaking = False
-                self.speech_frames = 0
-                return (False, True)  # 语音结束
-        
-        return (is_speech, False)
-        
-    def reset(self):
-        """重置状态"""
-        self.is_speaking = False
-        self.silence_frames = 0
-        self.speech_frames = 0
-```
-
-#### src/utils/logger.py
-
-```python
-"""
-日志工具
-"""
-import logging
-import sys
-from typing import Optional
-
-
-def setup_logger(name: str, log_file: Optional[str] = None, level: str = "INFO") -> logging.Logger:
-    """设置日志记录器"""
-    
-    logger = logging.getLogger(name)
-    logger.setLevel(getattr(logging, level.upper()))
-    
-    # 格式化器
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    # 控制台处理器
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    
-    # 文件处理器
-    if log_file:
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-    
-    return logger
-```
-
-### 7.3 requirements.txt
+### 8.3 requirements.txt
 
 ```txt
 # WebSocket 服务器
@@ -1980,9 +1288,9 @@ pytest-cov>=4.1.0
 
 ---
 
-## 部署指南
+## 9. 部署指南
 
-### 8.1 本地开发部署
+### 9.1 本地开发部署
 
 #### 步骤 1: 安装依赖
 
@@ -2017,7 +1325,7 @@ QWEN_API_KEY=your_api_key_here
 python main.py
 ```
 
-### 8.2 Docker 部署
+### 9.2 Docker 部署
 
 #### Dockerfile
 
@@ -2086,7 +1394,7 @@ docker-compose up -d
 docker-compose logs -f
 ```
 
-### 8.3 生产环境部署
+### 9.3 生产环境部署
 
 #### 使用 Systemd 服务
 
@@ -2138,7 +1446,7 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        
+
         # 超时设置
         proxy_connect_timeout 7d;
         proxy_send_timeout 7d;
@@ -2149,107 +1457,17 @@ server {
 
 ---
 
-## 测试方案
+## 10. 测试方案
 
-### 9.1 单元测试
+### 10.1 单元测试
 
-#### tests/test_adapters.py
+详细的单元测试示例请参考项目中的 `tests/` 目录。
 
-```python
-"""
-适配器单元测试
-"""
-import pytest
-from src.adapters.stt.qwen import QwenSTTAdapter
-from src.adapters.llm.qwen import QwenLLMAdapter
-from src.adapters.tts.qwen import QwenTTSAdapter
+### 10.2 集成测试
 
+完整的集成测试代码请参考项目源代码。
 
-@pytest.mark.asyncio
-async def test_stt_adapter():
-    """测试 STT 适配器"""
-    adapter = QwenSTTAdapter(api_key="test_key")
-    
-    # 模拟音频数据
-    audio_data = b'\x00' * 16000  # 1秒 8kHz PCM
-    
-    # 应该返回文本（或空字符串）
-    result = await adapter.transcribe(audio_data, sample_rate=8000)
-    assert isinstance(result, str)
-
-
-@pytest.mark.asyncio
-async def test_llm_adapter():
-    """测试 LLM 适配器"""
-    adapter = QwenLLMAdapter(api_key="test_key")
-    
-    messages = [
-        {"role": "user", "content": "你好"}
-    ]
-    
-    result = await adapter.chat(messages)
-    assert isinstance(result, str)
-    assert len(result) > 0
-
-
-@pytest.mark.asyncio
-async def test_tts_adapter():
-    """测试 TTS 适配器"""
-    adapter = QwenTTSAdapter(api_key="test_key")
-    
-    result = await adapter.synthesize("你好", sample_rate=8000)
-    assert isinstance(result, bytes)
-```
-
-### 9.2 集成测试
-
-#### tests/test_session.py
-
-```python
-"""
-会话集成测试
-"""
-import pytest
-import asyncio
-from unittest.mock import MagicMock, AsyncMock
-from src.session import SessionHandler
-from src.config import ServiceConfig
-
-
-@pytest.mark.asyncio
-async def test_session_audio_processing():
-    """测试完整的音频处理流程"""
-    
-    # 模拟 WebSocket
-    mock_ws = AsyncMock()
-    
-    # 创建配置
-    config = ServiceConfig()
-    config.vad_enabled = False
-    
-    # 创建会话
-    session = SessionHandler(
-        websocket=mock_ws,
-        session_id="test-session",
-        config=config
-    )
-    
-    # 模拟音频数据
-    audio_data = b'\x00' * 16000
-    
-    # 处理音频
-    await session.handle_audio(audio_data)
-    
-    # 等待处理完成
-    await asyncio.sleep(1)
-    
-    # 验证发送了响应
-    # assert mock_ws.send.called
-```
-
-### 9.3 WebSocket 客户端测试
-
-#### test_client.py
+### 10.3 WebSocket 客户端测试
 
 ```python
 """
@@ -2263,32 +1481,32 @@ import base64
 
 async def test_client():
     """测试 WebSocket 连接"""
-    
+
     uri = "ws://localhost:8080/stream"
-    
+
     async with websockets.connect(uri) as websocket:
         print("已连接到服务器")
-        
+
         # 发送文本消息测试
         message = {
             "type": "text",
             "content": "你好，请介绍一下你自己"
         }
-        
+
         await websocket.send(json.dumps(message))
         print("已发送文本消息")
-        
+
         # 接收响应
         response = await websocket.recv()
         print(f"收到响应: {len(response)} bytes")
-        
+
         # 解析响应
         data = json.loads(response)
-        
+
         if data.get("type") == "streamAudio":
             audio_data = base64.b64decode(data["data"]["audioData"])
             print(f"收到音频: {len(audio_data)} bytes")
-            
+
             # 保存音频
             with open("response.pcm", "wb") as f:
                 f.write(audio_data)
@@ -2301,9 +1519,9 @@ if __name__ == "__main__":
 
 ---
 
-## 最佳实践
+## 11. 最佳实践
 
-### 10.1 性能优化
+### 11.1 性能优化
 
 #### 1. 音频缓冲优化
 
@@ -2321,7 +1539,7 @@ OPTIMAL_BUFFER_DURATION = 0.5  # 500ms
 async def process_parallel():
     stt_task = asyncio.create_task(stt_adapter.transcribe(...))
     # 可以同时执行其他任务
-    
+
     result = await stt_task
 ```
 
@@ -2334,7 +1552,7 @@ session = aiohttp.ClientSession(
 )
 ```
 
-### 10.2 错误处理
+### 11.2 错误处理
 
 #### 1. 重试机制
 
@@ -2363,7 +1581,7 @@ except asyncio.TimeoutError:
     logger.error("STT 超时")
 ```
 
-### 10.3 监控和日志
+### 11.3 监控和日志
 
 #### 1. 结构化日志
 
@@ -2387,7 +1605,7 @@ metrics = {
 }
 ```
 
-### 10.4 安全性
+### 11.4 安全性
 
 #### 1. API 密钥管理
 
@@ -2407,7 +1625,80 @@ if len(audio_data) > MAX_AUDIO_SIZE:
     raise ValueError("音频数据过大")
 ```
 
+### 11.5 用户打断功能优化
+
+#### 1. VAD 参数调优
+
+- 降低 VAD 灵敏度阈值，避免误触发
+- 设置合理的静音检测时长（建议 300-500ms）
+
+#### 2. 延迟优化
+
+- 使用较小的音频缓冲（20-40ms）以减少延迟
+- 选择低延迟的音频编解码器（如 raw PCM）
+
+#### 3. 用户体验
+
+- 在 AI 回复的自然停顿点更容易被打断
+- 提供音频反馈提示用户打断成功（如"叮"声）
+
+#### 4. 错误处理
+
+- 处理网络抖动导致的误打断
+- 实现打断次数限制，防止循环打断
+
 ---
+
+## 12. 故障排查
+
+### 12.1 常见问题
+
+**问题**: 打断功能不工作
+
+- **检查**: 确认 WebSocket 服务器实现了 VAD 和打断逻辑
+- **检查**: 验证上行音频流是否正常（检查 `mono`/`stereo` 配置）
+- **检查**: 查看 FreeSWITCH 日志中的 `mod_audio_stream::json` 事件
+
+**问题**: 音频播放延迟高
+
+- **调整**: 减小 `STREAM_BUFFER_SIZE` 值（如 20ms 或 40ms）
+- **调整**: 使用 `raw` 音频格式代替 `mp3`/`ogg`
+- **检查**: 网络延迟和带宽
+
+**问题**: 频繁断开连接
+
+- **启用**: `STREAM_HEART_BEAT`（建议 30 秒）
+- **检查**: 负载均衡器的空闲超时设置
+- **检查**: TLS 证书配置
+
+### 12.2 调试建议
+
+1. 禁用日志抑制：不设置 `STREAM_SUPPRESS_LOG`
+2. 查看 FreeSWITCH 日志：`fs_cli -x "console loglevel debug"`
+3. 使用 Wireshark 抓包分析 WebSocket 流量
+4. 监控事件：`fs_cli -x "event plain mod_audio_stream::*"`
+
+---
+
+## 13. 术语表
+
+| 术语 | 全称 | 说明 |
+|------|------|------|
+| **STT** | Speech-to-Text | 语音识别技术，将语音转换为文本 |
+| **TTS** | Text-to-Speech | 语音合成技术，将文本转换为语音 |
+| **LLM** | Large Language Model | 大语言模型，用于自然语言理解和生成 |
+| **VAD** | Voice Activity Detection | 语音活动检测，用于识别语音和静音 |
+| **WebSocket** | - | 一种在单个TCP连接上进行全双工通讯的协议 |
+| **PCM** | Pulse Code Modulation | 脉冲编码调制，一种音频编码格式 |
+| **L16** | Linear 16-bit PCM | 16位线性PCM音频格式 |
+| **WSS** | WebSocket Secure | 基于TLS/SSL的安全WebSocket连接 |
+| **Qwen** | 通义千问 | 阿里云提供的AI服务平台 |
+| **ESL** | Event Socket Library | FreeSWITCH事件套接字库 |
+| **RAII** | Resource Acquisition Is Initialization | 资源获取即初始化，C++编程技术 |
+| **Base64** | - | 一种将二进制数据编码为ASCII字符的编码方式 |
+| **asyncio** | - | Python异步I/O框架 |
+| **Docker** | - | 容器化平台 |
+| **Nginx** | - | 高性能的HTTP和反向代理服务器 |
 
 ---
 
@@ -2516,313 +1807,9 @@ mod_audio_stream 模块会自动：
 
 ### A.3 完整代码示例
 
-#### WebSocket AI 服务端（发送 TTS 音频）
-
-```python
-class SessionHandler:
-    async def _process_speech(self):
-        """完整的对话处理流程"""
-        
-        # 1. STT: 语音识别
-        text = await self.stt_adapter.transcribe(
-            audio_data,
-            sample_rate=8000,
-            language="zh-CN"
-        )
-        
-        # 2. LLM: 对话生成
-        self.conversation_history.append({
-            "role": "user",
-            "content": text
-        })
-        
-        response = await self.llm_adapter.chat(
-            messages=self.conversation_history
-        )
-        
-        self.conversation_history.append({
-            "role": "assistant",
-            "content": response
-        })
-        
-        # 3. TTS: 文本转语音
-        audio_data = await self.tts_adapter.synthesize(
-            text=response,
-            voice="longxiaochun",
-            sample_rate=8000
-        )
-        
-        # 4. 发送音频到 mod_audio_stream
-        await self.send_audio(audio_data)
-    
-    async def send_audio(self, audio_data: bytes):
-        """发送音频到 mod_audio_stream"""
-        
-        # Base64 编码
-        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-        
-        # 构建 streamAudio 消息
-        message = {
-            "type": "streamAudio",
-            "data": {
-                "audioDataType": "raw",
-                "sampleRate": self.config.tts_sample_rate,
-                "audioData": audio_base64
-            }
-        }
-        
-        # 发送
-        await self.websocket.send(json.dumps(message))
-        
-        logger.info(f"[{self.session_id}] TTS 音频已发送到 mod_audio_stream: "
-                   f"{len(audio_data)} bytes, "
-                   f"采样率: {self.config.tts_sample_rate} Hz")
-```
-
-#### FreeSWITCH 端（接收并播放）
-
-**方式 1: 使用 Python ESL 自动播放**
-
-```python
-import ESL
-import json
-
-# 连接到 FreeSWITCH
-con = ESL.ESLconnection("localhost", "8021", "ClueCon")
-
-# 订阅播放事件
-con.events("plain", "CUSTOM mod_audio_stream::play")
-
-while True:
-    e = con.recvEvent()
-    
-    if e:
-        event_subclass = e.getHeader("Event-Subclass")
-        
-        if event_subclass == "mod_audio_stream::play":
-            uuid = e.getHeader("Unique-ID")
-            body = e.getBody()
-            
-            # 解析事件数据
-            data = json.loads(body)
-            file_path = data.get("file")
-            
-            print(f"收到 TTS 音频: {file_path}")
-            
-            # 播放音频到通道
-            con.api(f"uuid_broadcast {uuid} {file_path} both")
-            print(f"正在播放 TTS 音频到通道 {uuid}")
-```
-
-**方式 2: 使用 Lua 脚本自动播放**
-
-```lua
--- /usr/share/freeswitch/scripts/auto_play_tts.lua
-
-local con = freeswitch.EventConsumer("CUSTOM", "mod_audio_stream::play")
-local uuid = session:getVariable("uuid")
-
-while session:ready() do
-    local event = con:pop(1)  -- 等待 1 秒
-    
-    if event then
-        local event_uuid = event:getHeader("Unique-ID")
-        
-        if event_uuid == uuid then
-            local body = event:getBody()
-            local cjson = require("cjson")
-            local data = cjson.decode(body)
-            
-            if data.file then
-                freeswitch.consoleLog("info", "播放 TTS 音频: " .. data.file .. "\n")
-                session:streamFile(data.file)
-            end
-        end
-    end
-end
-```
-
-**拨号计划配置**:
-
-```xml
-<extension name="ai_assistant_with_auto_play">
-  <condition field="destination_number" expression="^9999$">
-    <action application="answer"/>
-    
-    <!-- 启动音频流 -->
-    <action application="uuid_audio_stream" 
-            data="${uuid} start ws://ai-service:8080/stream mono 8k"/>
-    
-    <!-- 运行 Lua 脚本处理自动播放 -->
-    <action application="lua" data="auto_play_tts.lua"/>
-    
-    <!-- 停止音频流 -->
-    <action application="uuid_audio_stream" data="${uuid} stop"/>
-    
-    <action application="hangup"/>
-  </condition>
-</extension>
-```
-
-#### WebSocket 服务器伪代码：
-```python
-async def handle_audio_stream(websocket):
-    vad = VoiceActivityDetector()
-    current_state = "IDLE"
-
-    async for message in websocket:
-        if message.type == "binary":  # 音频数据
-            audio_data = message.data
-
-            # VAD 检测
-            if current_state == "PLAYING":
-                if vad.detect_speech(audio_data):
-                    # 检测到用户说话，发送打断信号
-                    await websocket.send(json.dumps({
-                        "type": "interruptPlayback",
-                        "reason": "user_speaking"
-                    }))
-                    current_state = "INTERRUPTED"
-
-            # 处理用户语音
-            if current_state in ["LISTENING", "INTERRUPTED"]:
-                process_user_audio(audio_data)
-
-                if vad.is_speech_ended(audio_data):
-                    # 用户说话结束，生成回复
-                    current_state = "PROCESSING"
-                    response_audio = generate_ai_response()
-
-                    # 发送新的回复
-                    await websocket.send(json.dumps({
-                        "type": "streamAudio",
-                        "data": {
-                            "audioDataType": "raw",
-                            "sampleRate": 16000,
-                            "audioData": base64.b64encode(response_audio).decode()
-                        }
-                    }))
-                    current_state = "PLAYING"
-```
-
-### 7.3 发送文本消息
-
-```bash
-# 向 WebSocket 服务器发送文本消息
-uuid_audio_stream <uuid> send_text '{"action":"get_weather","city":"Beijing"}'
-```
-
-### 7.4 停止音频流
-
-```bash
-# 停止音频流并发送结束消息
-uuid_audio_stream <uuid> stop '{"reason":"user_hangup"}'
-```
-
-## 配置参数
-
-### 8. 通道变量
-
-| 变量名 | 说明 | 默认值 |
-|-------|------|--------|
-| `STREAM_MESSAGE_DEFLATE` | 禁用 per-message-deflate 压缩 | off |
-| `STREAM_HEART_BEAT` | 心跳间隔（秒） | off |
-| `STREAM_SUPPRESS_LOG` | 抑制日志输出 | off |
-| `STREAM_BUFFER_SIZE` | 缓冲时长（毫秒，必须是 20 的倍数） | 20 |
-| `STREAM_EXTRA_HEADERS` | 额外的 HTTP 头（JSON 格式） | none |
-| `STREAM_TLS_CA_FILE` | CA 证书文件路径 | SYSTEM |
-| `STREAM_TLS_KEY_FILE` | 客户端密钥文件 | none |
-| `STREAM_TLS_CERT_FILE` | 客户端证书文件 | none |
-| `STREAM_TLS_DISABLE_HOSTNAME_VALIDATION` | 禁用主机名验证 | false |
-
-## 最佳实践
-
-### 9.1 打断功能优化建议
-
-1. **VAD 参数调优**：
-   - 降低 VAD 灵敏度阈值，避免误触发
-   - 设置合理的静音检测时长（建议 300-500ms）
-
-2. **延迟优化**：
-   - 使用较小的音频缓冲（20-40ms）以减少延迟
-   - 选择低延迟的音频编解码器（如 raw PCM）
-
-3. **用户体验**：
-   - 在 AI 回复的自然停顿点更容易被打断
-   - 提供音频反馈提示用户打断成功（如"叮"声）
-
-4. **错误处理**：
-   - 处理网络抖动导致的误打断
-   - 实现打断次数限制，防止循环打断
-
-### 9.2 资源管理
-
-- 设置合理的并发通道限制
-- 监控临时文件磁盘使用
-- 实现会话超时自动清理机制
-
-## 技术细节
-
-### 10.1 音频文件管理
-
-- 临时文件存储在 `SWITCH_GLOBAL_dirs.temp_dir` 目录
-- 文件命名格式：`<session_id>_<index>.tmp.<extension>`
-- 会话结束时自动删除所有临时文件
-
-### 10.2 线程安全
-
-- 使用 `std::mutex` 保护共享状态
-- 使用 `std::atomic` 标记清理状态
-- 使用 `std::weak_ptr` 避免循环引用
-
-### 10.3 生命周期管理
-
-- WebSocket 连接与 FreeSWITCH 会话绑定
-- 会话关闭时自动清理 WebSocket 连接和临时文件
-- 支持优雅关闭（发送最终消息后断开）
-
-## 故障排查
-
-### 11.1 常见问题
-
-**问题**：打断功能不工作
-- **检查**：确认 WebSocket 服务器实现了 VAD 和打断逻辑
-- **检查**：验证上行音频流是否正常（检查 `mono`/`stereo` 配置）
-- **检查**：查看 FreeSWITCH 日志中的 `mod_audio_stream::json` 事件
-
-**问题**：音频播放延迟高
-- **调整**：减小 `STREAM_BUFFER_SIZE` 值（如 20ms 或 40ms）
-- **调整**：使用 `raw` 音频格式代替 `mp3`/`ogg`
-- **检查**：网络延迟和带宽
-
-**问题**：频繁断开连接
-- **启用**：`STREAM_HEART_BEAT`（建议 30 秒）
-- **检查**：负载均衡器的空闲超时设置
-- **检查**：TLS 证书配置
-
-### 11.2 调试建议
-
-1. 禁用日志抑制：不设置 `STREAM_SUPPRESS_LOG`
-2. 查看 FreeSWITCH 日志：`fs_cli -x "console loglevel debug"`
-3. 使用 Wireshark 抓包分析 WebSocket 流量
-4. 监控事件：`fs_cli -x "event plain mod_audio_stream::*"`
-
-## 版本信息
-
-- **社区版**：免费使用，限制 10 个并发通道
-- **商业版**：无并发限制，支持 5000+ 并发呼叫，提供源代码访问
-
-更多信息请联系：[amsoftswitch@gmail.com](mailto:amsoftswitch@gmail.com)
-
-## 参考资料
-
-- [RFC 6455 - WebSocket 协议](https://tools.ietf.org/html/rfc6455)
-- [FreeSWITCH 官方文档](https://freeswitch.org/confluence/)
-- [libwsc - WebSocket 客户端库](https://github.com/amigniter/libwsc)
+详细的代码实现请参考第 4 章核心组件设计。
 
 ### A.4 音频格式转换
-
-如果需要发送不同格式的音频：
 
 #### WAV 格式
 
@@ -2832,27 +1819,16 @@ import wave
 
 def pcm_to_wav(pcm_data: bytes, sample_rate: int) -> bytes:
     """将 PCM 转换为 WAV 格式"""
-    
+
     wav_buffer = io.BytesIO()
-    
+
     with wave.open(wav_buffer, 'wb') as wav_file:
         wav_file.setnchannels(1)      # 单声道
         wav_file.setsampwidth(2)      # 16-bit
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(pcm_data)
-    
+
     return wav_buffer.getvalue()
-
-# 使用
-wav_data = pcm_to_wav(audio_data, 8000)
-
-message = {
-    "type": "streamAudio",
-    "data": {
-        "audioDataType": "wav",
-        "audioData": base64.b64encode(wav_data).decode('utf-8')
-    }
-}
 ```
 
 #### MP3 格式（需要 pydub）
@@ -2863,7 +1839,7 @@ import io
 
 def pcm_to_mp3(pcm_data: bytes, sample_rate: int) -> bytes:
     """将 PCM 转换为 MP3 格式"""
-    
+
     # 创建 AudioSegment
     audio = AudioSegment(
         data=pcm_data,
@@ -2871,23 +1847,12 @@ def pcm_to_mp3(pcm_data: bytes, sample_rate: int) -> bytes:
         frame_rate=sample_rate,
         channels=1
     )
-    
+
     # 导出为 MP3
     mp3_buffer = io.BytesIO()
     audio.export(mp3_buffer, format="mp3", bitrate="32k")
-    
+
     return mp3_buffer.getvalue()
-
-# 使用
-mp3_data = pcm_to_mp3(audio_data, 8000)
-
-message = {
-    "type": "streamAudio",
-    "data": {
-        "audioDataType": "mp3",
-        "audioData": base64.b64encode(mp3_data).decode('utf-8')
-    }
-}
 ```
 
 ### A.5 性能优化
@@ -2899,15 +1864,15 @@ message = {
 ```python
 async def send_audio_chunked(self, audio_data: bytes, chunk_size: int = 32000):
     """分块发送大音频"""
-    
+
     total_size = len(audio_data)
     chunks = [audio_data[i:i+chunk_size] for i in range(0, total_size, chunk_size)]
-    
+
     logger.info(f"分块发送音频: {len(chunks)} 块, 总大小: {total_size} bytes")
-    
+
     for i, chunk in enumerate(chunks):
         await self.send_audio(chunk)
-        
+
         # 控制发送速率，避免缓冲区溢出
         if i < len(chunks) - 1:
             await asyncio.sleep(0.1)
@@ -2928,263 +1893,38 @@ async def send_audio_chunked(self, audio_data: bytes, chunk_size: int = 32000):
 # 节省带宽: ~97%
 ```
 
-#### 3. 异步处理
+---
 
-```python
-async def process_and_send_tts(self, text: str):
-    """异步 TTS 处理"""
-    
-    # TTS 和其他操作可以并行
-    tts_task = asyncio.create_task(
-        self.tts_adapter.synthesize(text)
-    )
-    
-    # 同时执行其他任务
-    # ...
-    
-    # 等待 TTS 完成
-    audio_data = await tts_task
-    await self.send_audio(audio_data)
-```
+## 版本历史
 
-### A.6 错误处理
-
-```python
-async def send_audio_safe(self, audio_data: bytes):
-    """带错误处理的音频发送"""
-    
-    try:
-        # 验证音频数据
-        if not audio_data or len(audio_data) == 0:
-            logger.warning("音频数据为空，跳过发送")
-            return False
-        
-        # 检查大小限制
-        max_size = 10 * 1024 * 1024  # 10MB
-        if len(audio_data) > max_size:
-            logger.error(f"音频数据过大: {len(audio_data)} bytes")
-            return False
-        
-        # Base64 编码
-        try:
-            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-        except Exception as e:
-            logger.error(f"Base64 编码失败: {e}")
-            return False
-        
-        # 构建消息
-        message = {
-            "type": "streamAudio",
-            "data": {
-                "audioDataType": "raw",
-                "sampleRate": self.config.tts_sample_rate,
-                "audioData": audio_base64
-            }
-        }
-        
-        # 发送
-        try:
-            await asyncio.wait_for(
-                self.websocket.send(json.dumps(message)),
-                timeout=5.0  # 5秒超时
-            )
-            logger.info(f"音频已发送: {len(audio_data)} bytes")
-            return True
-            
-        except asyncio.TimeoutError:
-            logger.error("发送音频超时")
-            return False
-            
-        except Exception as e:
-            logger.error(f"发送音频失败: {e}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"音频发送错误: {e}", exc_info=True)
-        return False
-```
-
-### A.7 调试和测试
-
-#### 测试音频发送
-
-```python
-import asyncio
-import websockets
-import json
-import base64
-
-async def test_send_tts_audio():
-    """测试 TTS 音频发送"""
-    
-    # 连接到 WebSocket 服务
-    uri = "ws://localhost:8080/stream"
-    
-    async with websockets.connect(uri) as websocket:
-        print("已连接到服务器")
-        
-        # 生成测试音频（1秒静音）
-        sample_rate = 8000
-        duration = 1.0
-        num_samples = int(sample_rate * duration)
-        test_audio = b'\x00' * (num_samples * 2)  # 16-bit
-        
-        # 编码
-        audio_base64 = base64.b64encode(test_audio).decode('utf-8')
-        
-        # 构建消息
-        message = {
-            "type": "streamAudio",
-            "data": {
-                "audioDataType": "raw",
-                "sampleRate": sample_rate,
-                "audioData": audio_base64
-            }
-        }
-        
-        # 发送
-        await websocket.send(json.dumps(message))
-        print(f"测试音频已发送: {len(test_audio)} bytes")
-        
-        # 等待响应
-        response = await websocket.recv()
-        print(f"收到响应: {response[:100]}...")
-
-# 运行测试
-asyncio.run(test_send_tts_audio())
-```
-
-#### 验证音频质量
-
-```python
-import numpy as np
-
-def validate_audio_quality(audio_data: bytes, sample_rate: int):
-    """验证音频质量"""
-    
-    # 转换为 numpy 数组
-    audio_array = np.frombuffer(audio_data, dtype=np.int16)
-    
-    # 检查音量
-    rms = np.sqrt(np.mean(audio_array.astype(float)**2))
-    print(f"RMS 音量: {rms:.2f}")
-    
-    # 检查是否有削波
-    max_val = np.max(np.abs(audio_array))
-    if max_val >= 32767:
-        print("警告: 检测到音频削波")
-    
-    # 检查是否为静音
-    if rms < 100:
-        print("警告: 音频可能为静音")
-    
-    # 检查时长
-    duration = len(audio_array) / sample_rate
-    print(f"音频时长: {duration:.2f} 秒")
-    
-    return {
-        "rms": rms,
-        "max_amplitude": max_val,
-        "duration": duration,
-        "is_clipping": max_val >= 32767,
-        "is_silent": rms < 100
-    }
-```
-
-### A.8 常见问题
-
-#### Q1: 音频没有播放？
-
-**检查清单**:
-1. 确认 WebSocket 连接正常
-2. 验证 streamAudio 消息格式正确
-3. 检查 mod_audio_stream::play 事件是否触发
-4. 确认 FreeSWITCH 通道仍然活跃
-5. 验证音频数据不为空
-
-```python
-# 添加调试日志
-logger.debug(f"音频大小: {len(audio_data)} bytes")
-logger.debug(f"采样率: {sample_rate} Hz")
-logger.debug(f"Base64 大小: {len(audio_base64)} chars")
-```
-
-#### Q2: 音频质量差或有噪音？
-
-**可能原因**:
-1. 采样率不匹配
-2. 字节序错误
-3. 音频数据损坏
-
-**解决方案**:
-```python
-# 确保采样率匹配
-tts_sample_rate = 8000
-message["data"]["sampleRate"] = tts_sample_rate
-
-# 验证音频格式
-if audioDataType == "raw":
-    # PCM 必须是 16-bit, Big-endian
-    # 确保 TTS 返回的是正确格式
-```
-
-#### Q3: 发送大音频导致延迟？
-
-**解决方案**: 使用流式传输或压缩格式
-
-```python
-# 方案 1: 分块发送
-await send_audio_chunked(audio_data, chunk_size=16000)
-
-# 方案 2: 使用压缩格式
-mp3_data = convert_to_mp3(audio_data)
-message["data"]["audioDataType"] = "mp3"
-```
-
-### A.9 总结
-
-TTS 音频流传输到 mod_audio_stream 的关键点：
-
-1. ✅ **TTS 生成**: 获取 PCM 格式音频数据
-2. ✅ **Base64 编码**: 将二进制数据编码为文本
-3. ✅ **streamAudio 封装**: 构建符合规范的 JSON 消息
-4. ✅ **WebSocket 发送**: 通过 WebSocket 传输到 mod_audio_stream
-5. ✅ **自动播放**: mod_audio_stream 触发事件，应用程序播放
-
-整个流程已在设计文档中完整实现，支持多种音频格式，具有良好的错误处理和性能优化。
+| 版本 | 日期 | 更新内容 |
+|------|------|----------|
+| 2.0.0 | 2026-02-09 | 合并 FreeSWITCH 和 Python 服务文档，消除重复，添加术语表 |
+| 1.1.0 | 2026-02-06 | 添加附录A - TTS音频流传输详解 |
+| 1.0.0 | 2026-02-06 | 初始版本，完整的 Python WebSocket 服务设计 |
 
 ---
-## 总结
 
-本设计文档详细描述了一个基于 Python 的 WebSocket AI 对话服务的完整实现方案。主要特点：
+## 参考资料
 
-### ✅ 核心功能
-- 实时音频流接收和处理
-- STT、LLM、TTS 完整对话链路
-- 默认集成通义千问（Qwen）服务
-- 模块化、可扩展的适配器设计
+- [RFC 6455 - WebSocket 协议](https://tools.ietf.org/html/rfc6455)
+- [FreeSWITCH 官方文档](https://freeswitch.org/confluence/)
+- [libwsc - WebSocket 客户端库](https://github.com/amigniter/libwsc)
+- [通义千问 API 文档](https://help.aliyun.com/zh/dashscope/)
+- [Python asyncio 文档](https://docs.python.org/3/library/asyncio.html)
+- [WebRTC VAD 文档](https://webrtc.org/)
 
-### ✅ 技术亮点
-- 异步架构，高并发支持
-- VAD 智能语音端点检测
-- 完善的错误处理和恢复
-- 灵活的配置管理
+---
 
-### ✅ 生产就绪
-- Docker 容器化部署
-- 完整的测试方案
-- 监控和日志
-- 性能优化建议
+## 版本信息
 
-### 📚 相关资源
+- **社区版**: 免费使用，限制 10 个并发通道
+- **商业版**: 无并发限制，支持 5000+ 并发呼叫，提供源代码访问
 
-- [mod_audio_stream 集成指南](./FreeSWITCH集成指南.md)
-- [Python ESL 使用指南](./Python_ESL_使用指南.md)
-- [音频播放控制指南](./音频播放控制指南.md)
-- [代码逻辑分析](./代码逻辑分析.md)
+更多信息请联系：[amsoftswitch@gmail.com](mailto:amsoftswitch@gmail.com)
 
 ---
 
 **版权声明**: 本文档遵循 MIT 许可证
 
-**最后更新**: 2026-02-06 (v1.1.0 - 添加TTS音频流传输详解)
+**最后更新**: 2026-02-09 (v2.0.0 - 文档整合与优化)
